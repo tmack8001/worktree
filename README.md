@@ -13,7 +13,7 @@ Two variants are available:
 ### One-liner
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/your-org/worktree/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tmack8001/worktree/refs/heads/main/install.sh | sh
 ```
 
 The installer auto-detects your shell and adds a source line to your rc file.
@@ -204,20 +204,75 @@ vhs demo/demo.tape
 
 ### Native git worktree ([source](https://git-scm.com/docs/git-worktree))
 
-Typical commands
+Typical commands used day to day:
 
-```
+```sh
 git worktree list
-git worktree add <worktreename> <branchname>
+git worktree add <path> <branch>
 ```
 
 Focus: no abstraction
-Strengths:
-Built-in, no dependencies
-Weakness:
-Verbose, manual lifecycle management
+Strengths: Built-in, no dependencies
+Weakness: Verbose, manual lifecycle management, single repository only
 
-https://github.com/fingergohappy/git-wt
+
+### zsh-git-worktrees ([source](https://github.com/egyptianbman/zsh-git-worktrees))
+
+Typical commands used day to day:
+
+```sh
+gwt
+gwt <my-feature>
+```
+
+Focus: script away friction, not change workflow
+Strengths: fast, minimum, tab completetion, shell-native
+Weaknesses: no lifecycle management, no workflow abstraction, limited flexibility (forced directory structure)
+
+
+### worktrunk ([source](https://github.com/max-sixty/worktrunk))
+
+> [!TIP]
+> I am increasingly using worktrunk more and more for managing worktrees within a single repository. However, this project (for now) I focused on navigating and managing multiple worktrees across multiple repositories (e.g. `w list --all`), which avoids that limitation. The built in flexibility of worktrunk is by far superior for management and workflow automation/simplification.
+
+Typical commands used day to day:
+
+```sh
+wt list
+wt list --full
+wt switch <feature>
+wt switch --execute kiro-cli chat "build <feature>"
+```
+
+Focus: general purpose workflow engine with high degrees of configurability
+Strengths: rich workflows, async data loading, robust automation hooks, CI/CD integrations
+Weaknesses: single repository scope, higher complexity
+
+### git-wt ([source](https://github.com/fingergohappy/git-wt))
+
+Typical commands used day to day:
+
+```
+git-wt create <feature>
+git-wt list
+git-wt remove <feature>
+```
+
+Focus: lightweight, opinionated wrapper around git worktree
+Strengths: simple, centralized workspace directory
+Weaknesses: limited extensibility, minimal automation, single-repository scope
+
+
+### Comparison
+
+| Tool                | Focus                 | Abstraction Level | Multi-repo | Automation |
+| ------------------- | --------------------- | ----------------- | ---------- | ---------- |
+| Native git worktree | Raw Git               | Low               | ❌          | ❌          |
+| zsh-git-worktrees   | CLI ergonomics        | Low               | ❌          | ❌          |
+| git-wt              | Lightweight wrapper   | Medium            | ❌          | ⚠️         |
+| worktrunk           | Workflow engine       | High              | ❌          | ✅          |
+| **this project**    | Multi-repo navigation | Medium            | ✅          | ⚠️         |
+
 
 ## License
 

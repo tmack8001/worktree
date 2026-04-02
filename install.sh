@@ -2,7 +2,7 @@
 # worktree — git worktree helper installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/your-org/worktree/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/tmack8001/worktree/main/install.sh | sh
 #   or: ./install.sh [--zsh | --sh] [--prefix <dir>]
 #
 # Options:
@@ -14,7 +14,7 @@
 
 set -e
 
-REPO_URL="https://raw.githubusercontent.com/your-org/worktree/main"
+REPO_URL="https://raw.githubusercontent.com/tmack8001/worktree/main"
 INSTALL_PREFIX="${HOME}/.local/bin"
 FORCE_VARIANT=""
 RC_FILE=""
