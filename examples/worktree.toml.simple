@@ -1,0 +1,18 @@
+# .worktree.toml — simple example
+#
+# Just setup commands — no tmux, no profiles.
+# Good starting point if you only want post-creation automation.
+#
+# Place in your repo root and run `worktree add <branch>` to try it.
+
+base_branch = "main"
+
+[profile.default]
+branches = "*"
+
+# Runs once when a worktree is created with `worktree add`
+[[profile.default.setup]]
+run = "cp .env.example .env"
+
+[[profile.default.setup]]
+run = "npm install"

@@ -1,0 +1,77 @@
+# .worktree.toml — advanced example
+#
+# Demonstrates per-branch profiles with setup, pre-launch, and tmux windows.
+# Place this file in your repo root (commit it or .gitignore it).
+#
+# Lifecycle:
+#   worktree add <branch>  → runs matching profile's setup commands (once)
+#   worktree dev           → runs pre commands, then opens tmux windows
+
+# Base branch for new worktrees. Auto-detected from origin HEAD if omitted.
+base_branch = "main"
+
+# ── Frontend branches ──────────────────────────────────────────────
+
+[profile.frontend]
+branches = "fe/*, frontend/*, ui/*"
+
+# Runs once on `worktree add` — environment setup, dependency install
+[[profile.frontend.setup]]
+run = "direnv allow ."
+
+[[profile.frontend.setup]]
+run = "make install-fe"
+
+# Runs every `worktree dev` before tmux windows open — keep deps fresh
+[[profile.frontend.pre]]
+run = "cd src/tsx && npm install"
+
+[[profile.frontend.windows]]
+name = "proxy"
+dir = "src/tsx"
+run = "npm run proxy https://my-env.example.com/"
+
+[[profile.frontend.windows]]
+name = "fe"
+run = "make run-fe"
+
+# ── Backend branches ───────────────────────────────────────────────
+
+[profile.backend]
+branches = "be/*, backend/*, api/*"
+
+[[profile.backend.setup]]
+run = "direnv allow ."
+
+[[profile.backend.setup]]
+run = "make install"
+
+[[profile.backend.pre]]
+run = "make deps"
+
+[[profile.backend.windows]]
+name = "server"
+run = "make run"
+
+# ── Default (catch-all) ────────────────────────────────────────────
+
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "direnv allow ."
+
+[[profile.default.setup]]
+run = "make install-fe"
+
+[[profile.default.pre]]
+run = "cd src/tsx && npm install"
+
+[[profile.default.windows]]
+name = "proxy"
+dir = "src/tsx"
+run = "npm run proxy https://my-env.example.com/"
+
+[[profile.default.windows]]
+name = "fe"
+run = "make run-fe"
