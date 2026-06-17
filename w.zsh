@@ -6,6 +6,7 @@
 #   worktree clone <repo> [branch]  clone a repo headless & optionally add worktree
 #   worktree add <branch>           create worktree & cd into it
 #   worktree <branch>               cd into worktree or create it
+#   worktree <pr-url>               resolve GH PR URL to branch, then add/cd
 #   worktree rm  [<branch>]         remove worktree
 #   worktree ls  [--all]            list worktrees
 #   worktree cd  <branch>           cd into existing worktree
@@ -445,6 +446,13 @@ EOF
 _w_go() {
   local repo="$1" wtdir="$2" branch="$3"
 
+  # Resolve GitHub PR URLs to branch names
+  local resolved
+  if resolved=$(_w_resolve_pr_url "$branch"); then
+    echo "🔗 Resolved PR → $resolved"
+    branch="$resolved"
+  fi
+
   # If the worktree exists, cd into it; otherwise create it
   local dest="$wtdir/$branch"
   if [[ -d "$dest" ]]; then
@@ -460,10 +468,12 @@ _w_add() {
   if [[ "$branch" == "--help" || "$branch" == "-h" ]]; then
     cat <<'EOF'
 Usage: w add <branch>
+       w add <github-pr-url>
        w <branch>
 
 Create a new worktree and cd into it.
 
+  - If <branch> is a GitHub PR URL, resolves the branch via gh CLI.  
   - If <branch> exists locally, checks it out in a new worktree.
   - If <branch> exists on origin, checks out the remote tracking branch.
   - If <branch> doesn't exist, creates a new branch based off the
@@ -477,11 +487,22 @@ If the worktree already exists, just cd's into it.
 
 If a .worktree.toml exists in the repo root, the matching profile's
 setup commands will run automatically after creation.
+
+Examples:
+  w add feat/login
+  w add https://github.com/org/repo/pull/42
 EOF
     return 0
   fi
 
   [[ -z "$branch" ]] && { echo "usage: w add <branch> (see w add --help)"; return 1; }
+
+  # Resolve GitHub PR URLs to branch names
+  local resolved
+  if resolved=$(_w_resolve_pr_url "$branch"); then
+    echo "🔗 Resolved PR → $resolved"
+    branch="$resolved"
+  fi
 
   local dest="$wtdir/$branch"
 
@@ -937,7 +958,8 @@ _w_help() {
   printf "       ${cyan}worktree${reset} ${yellow}--all${reset}              interactive switcher across all repos\n"
   printf "       ${cyan}worktree${reset} ${yellow}clone${reset} <url> [br]   clone a repo headless for worktree workflows\n"
   printf "       ${cyan}worktree${reset} ${yellow}add${reset} <branch>       create a new worktree and cd into it\n"
-  printf "       ${cyan}worktree${reset} ${yellow}<branch>${reset}            cd into worktree if it exists, otherwise create it\n"
+  printf "       ${cyan}worktree${reset} ${yellow}<branch>${reset}           cd into worktree if it exists, otherwise create it\n"
+  printf "       ${cyan}worktree${reset} ${yellow}<pr-url>${reset}           resolve a GitHub PR URL to its branch, then add/cd\n"
   printf "       ${cyan}worktree${reset} ${yellow}rm${reset}  [<branch>]     remove a worktree ${dim}(prompts to delete branch)${reset}\n"
   printf "       ${cyan}worktree${reset} ${yellow}ls${reset} [--all]         list worktrees ${dim}(--all for all repos)${reset}\n"
   printf "       ${cyan}worktree${reset} ${yellow}cd${reset}  <branch>       cd into an existing worktree\n"
