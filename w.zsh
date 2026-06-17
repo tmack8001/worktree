@@ -63,6 +63,42 @@ _w_short_path() { printf '%s/%s' "${1:h:t}" "${1:t}" }
 # Strip leading and trailing whitespace
 _w_trim() { local s="$1"; s="${s#"${s%%[! 	]*}"}"; s="${s%"${s##*[! 	]}"}"; echo "$s"; }
 
+# ── GitHub PR URL resolution ────────────────────────────────────────
+
+# Detect if a string is a GitHub PR URL and resolve it to a branch name.
+# Supports:
+#   https://github.com/owner/repo/pull/123
+#   https://github.com/owner/repo/pulls/123
+#   With or without trailing slash
+# Returns 0 and prints the branch name on success, returns 1 if not a PR URL.
+_w_resolve_pr_url() {
+  local input="$1"
+
+  # Match GitHub PR URL patterns
+  if [[ "$input" =~ '^https?://github\.com/[^/]+/[^/]+/pulls?/[0-9]+/?$' ]]; then
+    # Normalize: strip trailing slash, fix /pulls/ to /pull/
+    local url="${input%/}"
+    url="${url/\/pulls\//\/pull\/}"
+
+    if ! command -v gh &>/dev/null; then
+      echo "gh CLI not installed — install with: brew install gh" >&2
+      return 1
+    fi
+
+    local branch
+    branch=$(gh pr view "$url" --json headRefName --jq '.headRefName' 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+      echo "Failed to resolve PR URL: $url" >&2
+      return 1
+    fi
+
+    echo "$branch"
+    return 0
+  fi
+
+  return 1
+}
+
 # ── Base branch resolution ─────────────────────────────────────────
 
 # Resolve the base branch for new worktrees. Priority:
