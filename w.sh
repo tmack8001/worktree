@@ -77,6 +77,93 @@ _w_trim() {
   printf '%s' "$s"
 }
 
+# ── GitHub URL resolution ──────────────────────────────────────────
+
+# Detect if a string is a GitHub branch tree URL and extract the branch name.
+# Supports:
+#   https://github.com/owner/repo/tree/<branch>
+#   With or without trailing slash; branch may contain slashes (e.g. feat/foo)
+# Returns 0 and prints the branch name on success, returns 1 if not a tree URL.
+_w_resolve_branch_url() {
+  local input="$1"
+
+  # Strip trailing slash
+  local normalized="${input%/}"
+
+  # Match https://github.com/<owner>/<repo>/tree/<anything>
+  case "$normalized" in
+    https://github.com/*/*/tree/*)
+      # Extract everything after /tree/
+      local after_tree="${normalized#https://github.com/*/*/tree/}"
+      if [ -n "$after_tree" ]; then
+        printf '%s' "$after_tree"
+        return 0
+      fi
+      ;;
+    http://github.com/*/*/tree/*)
+      local after_tree="${normalized#http://github.com/*/*/tree/}"
+      if [ -n "$after_tree" ]; then
+        printf '%s' "$after_tree"
+        return 0
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+# Detect if a string is a GitHub PR URL and resolve it to a branch name.
+# Supports:
+#   https://github.com/owner/repo/pull/123
+#   https://github.com/owner/repo/pulls/123
+#   With or without trailing slash
+# Returns 0 and prints the branch name on success, returns 1 if not a PR URL.
+_w_resolve_pr_url() {
+  local input="$1"
+
+  # Strip trailing slash for matching
+  local normalized="${input%/}"
+
+  # Match GitHub PR URL patterns using case (POSIX-compatible)
+  case "$normalized" in
+    http://github.com/*/pull/[0-9]*|\
+    http://github.com/*/pulls/[0-9]*|\
+    https://github.com/*/pull/[0-9]*|\
+    https://github.com/*/pulls/[0-9]*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  # Normalize /pulls/ to /pull/ for gh CLI
+  local url
+  case "$normalized" in
+    */pulls/*)
+      # Replace /pulls/ with /pull/
+      url="${normalized%%/pulls/*}/pull/${normalized##*/pulls/}"
+      ;;
+    *)
+      url="$normalized"
+      ;;
+  esac
+
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "gh CLI not installed — install with: brew install gh" >&2
+    return 1
+  fi
+
+  local branch
+  branch=$(gh pr view "$url" --json headRefName --jq '.headRefName' 2>/dev/null)
+  if [ -z "$branch" ]; then
+    echo "Failed to resolve PR URL: $url" >&2
+    return 1
+  fi
+
+  printf '%s' "$branch"
+  return 0
+}
+
 # ── Base branch resolution ─────────────────────────────────────────
 
 _w_base_branch() {
@@ -487,6 +574,18 @@ EOF
 
 _w_go() {
   local repo="$1" wtdir="$2" branch="$3"
+
+  # Resolve GitHub branch tree URLs to branch names
+  local resolved
+  if resolved=$(_w_resolve_branch_url "$branch"); then
+    echo "🔗 Resolved branch URL → $resolved"
+    branch="$resolved"
+  # Resolve GitHub PR URLs to branch names
+  elif resolved=$(_w_resolve_pr_url "$branch"); then
+    echo "🔗 Resolved PR → $resolved"
+    branch="$resolved"
+  fi
+
   local dest="$wtdir/$branch"
   if [ -d "$dest" ]; then
     cd "$dest"
@@ -502,10 +601,14 @@ _w_add() {
     --help|-h)
       cat <<'EOF'
 Usage: w add <branch>
+       w add <github-pr-url>
+       w add <github-branch-url>
        w <branch>
 
 Create a new worktree and cd into it.
 
+  - If <branch> is a GitHub PR URL, resolves the branch via gh CLI.
+  - If <branch> is a GitHub branch tree URL, extracts the branch name.
   - If <branch> exists locally, checks it out in a new worktree.
   - If <branch> exists on origin, checks out the remote tracking branch.
   - If <branch> doesn't exist, creates a new branch based off the
@@ -513,11 +616,27 @@ Create a new worktree and cd into it.
 
 If a .worktree.toml exists, the matching profile's setup commands run
 automatically after creation.
+
+Examples:
+  w add feat/login
+  w add https://github.com/org/repo/pull/42
+  w add https://github.com/org/repo/tree/feat/my-branch
 EOF
       return 0 ;;
   esac
 
   [ -z "$branch" ] && { echo "usage: w add <branch> (see w add --help)"; return 1; }
+
+  # Resolve GitHub branch tree URLs to branch names
+  local resolved
+  if resolved=$(_w_resolve_branch_url "$branch"); then
+    echo "🔗 Resolved branch URL → $resolved"
+    branch="$resolved"
+  # Resolve GitHub PR URLs to branch names
+  elif resolved=$(_w_resolve_pr_url "$branch"); then
+    echo "🔗 Resolved PR → $resolved"
+    branch="$resolved"
+  fi
 
   local dest="$wtdir/$branch"
 
@@ -532,16 +651,21 @@ EOF
   if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
     echo "🌿 Creating worktree: $branch"
     git -C "$repo" worktree add "$dest" "$branch"
-  elif git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-    echo "🌿 Creating worktree: $branch (from origin)"
-    git -C "$repo" worktree add "$dest" "$branch"
   else
-    local base
-    base=$(_w_base_branch "$repo")
-    echo "🌿 Creating worktree: $branch (from $base)"
-    git -C "$repo" fetch origin "$base" 2>/dev/null
-    git -C "$repo" worktree add -b "$branch" "$dest" "origin/$base" 2>/dev/null \
-      || git -C "$repo" worktree add -b "$branch" "$dest" "$base"
+    # Fetch from origin to ensure we have the latest refs
+    echo "  📡 Fetching from origin..."
+    git -C "$repo" fetch origin 2>/dev/null
+
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      echo "🌿 Creating worktree: $branch (tracking origin/$branch)"
+      git -C "$repo" worktree add --track -b "$branch" "$dest" "origin/$branch"
+    else
+      local base
+      base=$(_w_base_branch "$repo")
+      echo "🌿 Creating worktree: $branch (new branch from $base)"
+      git -C "$repo" worktree add -b "$branch" "$dest" "origin/$base" 2>/dev/null \
+        || git -C "$repo" worktree add -b "$branch" "$dest" "$base"
+    fi
   fi
 
   local wt_ok=$?
@@ -874,6 +998,8 @@ _w_help() {
   printf "       ${cyan}worktree${reset} ${yellow}clone${reset} <url> [br]   clone a repo headless for worktree workflows\n"
   printf "       ${cyan}worktree${reset} ${yellow}add${reset} <branch>       create a new worktree and cd into it\n"
   printf "       ${cyan}worktree${reset} ${yellow}<branch>${reset}            cd into worktree if it exists, otherwise create it\n"
+  printf "       ${cyan}worktree${reset} ${yellow}<pr-url>${reset}            resolve a GitHub PR URL to its branch, then add/cd\n"
+  printf "       ${cyan}worktree${reset} ${yellow}<tree-url>${reset}          resolve a GitHub branch tree URL, then add/cd\n"
   printf "       ${cyan}worktree${reset} ${yellow}rm${reset}  [<branch>]     remove a worktree ${dim}(prompts to delete branch)${reset}\n"
   printf "       ${cyan}worktree${reset} ${yellow}ls${reset} [--all]         list worktrees ${dim}(--all for all repos)${reset}\n"
   printf "       ${cyan}worktree${reset} ${yellow}cd${reset}  <branch>       cd into an existing worktree\n"

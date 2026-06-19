@@ -333,6 +333,232 @@ TOML
   [[ "$output" == *"Clone a repository"* ]]
 }
 
+# ── _w_resolve_pr_url ─────────────────────────────────────────────
+
+@test "_w_resolve_pr_url: returns 1 for plain branch name" {
+  run _w_resolve_pr_url "feat/login"
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_pr_url: returns 1 for non-github url" {
+  run _w_resolve_pr_url "https://gitlab.com/org/repo/merge_requests/42"
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_pr_url: returns 1 for empty input" {
+  run _w_resolve_pr_url ""
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_pr_url: errors when gh not installed" {
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
+  [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+@test "_w_resolve_pr_url: normalizes /pulls/ to /pull/ in error message" {
+  # gh is not available so we can only confirm the URL is normalised
+  # before gh is called (visible in the error output)
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
+  # Returns non-zero (gh not found), but must NOT output /pulls/ in any
+  # gh-related message — the URL was already normalised before that call
+  [[ "$output" != *"/pulls/"* ]]
+}
+
+@test "_w_resolve_pr_url: accepts http:// PR URL" {
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
+  # gh not installed, but we get the gh error (not "not a PR URL")
+  [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+@test "_w_resolve_pr_url: accepts trailing-slash URL" {
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
+  [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+@test "_w_resolve_pr_url: rejects url missing PR number" {
+  run _w_resolve_pr_url "https://github.com/org/repo/pull/"
+  [ "$status" -eq 1 ]
+}
+
+# ── w add: remote branch tracking ─────────────────────────────────
+
+@test "w add: tracks remote branch that exists on origin" {
+  # Push a branch to the remote so it appears as a remote ref
+  git -C "$REPO" checkout -b remote-only -q
+  echo "remote" > "$REPO/remote-file.txt"
+  git -C "$REPO" add remote-file.txt
+  git -C "$REPO" commit -qm "remote branch commit"
+  git -C "$REPO" push origin remote-only -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D remote-only -q
+
+  cd "$REPO"
+  worktree add remote-only 2>/dev/null
+  [ -d "$WTS/remote-only" ]
+  # The worktree should be on the remote-only branch
+  branch=$(git -C "$WTS/remote-only" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = "remote-only" ]
+}
+
+@test "w add: remote branch has upstream tracking set" {
+  git -C "$REPO" checkout -b tracked-remote -q
+  echo "x" > "$REPO/tracked.txt"
+  git -C "$REPO" add tracked.txt
+  git -C "$REPO" commit -qm "tracked"
+  git -C "$REPO" push origin tracked-remote -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D tracked-remote -q
+
+  cd "$REPO"
+  worktree add tracked-remote 2>/dev/null
+  upstream=$(git -C "$WTS/tracked-remote" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+  [ "$upstream" = "origin/tracked-remote" ]
+}
+
+@test "w add: shows tracking message for remote branch" {
+  git -C "$REPO" checkout -b msg-remote -q
+  echo "x" > "$REPO/msg.txt"
+  git -C "$REPO" add msg.txt
+  git -C "$REPO" commit -qm "msg"
+  git -C "$REPO" push origin msg-remote -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D msg-remote -q
+
+  cd "$REPO"
+  run worktree add msg-remote
+  [[ "$output" == *"tracking origin/msg-remote"* ]]
+}
+
+# ── w add PR URL (no gh CLI) ───────────────────────────────────────
+
+@test "w add: PR URL without gh CLI prints error" {
+  cd "$REPO"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree add 'https://github.com/org/repo/pull/1' 2>&1"
+  [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+@test "w <pr-url>: PR URL shortcut without gh CLI prints error" {
+  cd "$REPO"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree 'https://github.com/org/repo/pull/1' 2>&1"
+  [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+# ── _w_resolve_branch_url ─────────────────────────────────────────
+
+@test "_w_resolve_branch_url: extracts simple branch from tree URL" {
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/main")
+  [ "$result" = "main" ]
+}
+
+@test "_w_resolve_branch_url: extracts slash branch from tree URL" {
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/my-feature")
+  [ "$result" = "feat/my-feature" ]
+}
+
+@test "_w_resolve_branch_url: extracts deeply nested branch" {
+  result=$(_w_resolve_branch_url "https://github.com/djohnsonigra/gigascale-scribes/tree/claude/quirky-kapitsa-7274a7")
+  [ "$result" = "claude/quirky-kapitsa-7274a7" ]
+}
+
+@test "_w_resolve_branch_url: strips trailing slash" {
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/foo/")
+  [ "$result" = "feat/foo" ]
+}
+
+@test "_w_resolve_branch_url: accepts http:// tree URL" {
+  result=$(_w_resolve_branch_url "http://github.com/org/repo/tree/my-branch")
+  [ "$result" = "my-branch" ]
+}
+
+@test "_w_resolve_branch_url: returns 1 for plain branch name" {
+  run _w_resolve_branch_url "feat/login"
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_branch_url: returns 1 for PR URL" {
+  run _w_resolve_branch_url "https://github.com/org/repo/pull/42"
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_branch_url: returns 1 for non-github URL" {
+  run _w_resolve_branch_url "https://gitlab.com/org/repo/tree/main"
+  [ "$status" -eq 1 ]
+}
+
+@test "_w_resolve_branch_url: returns 1 for tree URL without branch" {
+  run _w_resolve_branch_url "https://github.com/org/repo/tree/"
+  [ "$status" -eq 1 ]
+}
+
+# ── w add branch tree URL ─────────────────────────────────────────
+
+@test "w add: branch tree URL creates worktree for extracted branch" {
+  # Push a branch to origin so the worktree can be checked out
+  git -C "$REPO" checkout -b tree-url-branch -q
+  echo "x" > "$REPO/tree-url.txt"
+  git -C "$REPO" add tree-url.txt
+  git -C "$REPO" commit -qm "tree url branch"
+  git -C "$REPO" push origin tree-url-branch -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D tree-url-branch -q
+
+  cd "$REPO"
+  run worktree add "https://github.com/org/repo/tree/tree-url-branch"
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/tree-url-branch" ]
+}
+
+@test "w add: branch tree URL shows resolved message" {
+  git -C "$REPO" checkout -b tree-url-msg -q
+  git -C "$REPO" push origin tree-url-msg -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D tree-url-msg -q
+
+  cd "$REPO"
+  run worktree add "https://github.com/org/repo/tree/tree-url-msg"
+  [[ "$output" == *"Resolved branch URL"* ]]
+}
+
+@test "w <tree-url>: shortcut resolves and creates worktree" {
+  git -C "$REPO" checkout -b tree-shortcut -q
+  git -C "$REPO" push origin tree-shortcut -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D tree-shortcut -q
+
+  cd "$REPO"
+  run worktree "https://github.com/org/repo/tree/tree-shortcut"
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/tree-shortcut" ]
+}
+
+@test "w add: slash branch tree URL creates nested worktree" {
+  git -C "$REPO" checkout -b feat/tree-nested -q
+  git -C "$REPO" push origin feat/tree-nested -q
+  git -C "$REPO" checkout main -q
+  git -C "$REPO" branch -D feat/tree-nested -q
+
+  cd "$REPO"
+  worktree add "https://github.com/org/repo/tree/feat/tree-nested" 2>/dev/null
+  [ -d "$WTS/feat/tree-nested" ]
+}
+
+# ── w add --help updated content ──────────────────────────────────
+
+@test "w add --help: mentions github-pr-url" {
+  run worktree add --help
+  [[ "$output" == *"github-pr-url"* ]]
+}
+
+@test "w add --help: mentions github-branch-url" {
+  run worktree add --help
+  [[ "$output" == *"github-branch-url"* ]]
+}
+
+@test "w add --help: shows examples section" {
+  run worktree add --help
+  [[ "$output" == *"Examples:"* ]]
+}
+
 # ── TOML config parser ─────────────────────────────────────────────
 
 @test "_w_load_config: matches fe/* to frontend profile" {

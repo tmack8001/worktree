@@ -858,6 +858,270 @@ test_clone_help() {
   assert_contains "clone help" "$output" "Clone a repository"
 }
 
+test_resolve_branch_url() {
+  echo "── _w_resolve_branch_url ──"
+
+  # Valid tree URLs
+  local result
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/main" 2>/dev/null)
+  assert_eq "simple branch" "main" "$result"
+
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/my-feature" 2>/dev/null)
+  assert_eq "slash branch" "feat/my-feature" "$result"
+
+  result=$(_w_resolve_branch_url "https://github.com/djohnsonigra/gigascale-scribes/tree/claude/quirky-kapitsa-7274a7" 2>/dev/null)
+  assert_eq "deeply nested branch" "claude/quirky-kapitsa-7274a7" "$result"
+
+  result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/foo/" 2>/dev/null)
+  assert_eq "strips trailing slash" "feat/foo" "$result"
+
+  result=$(_w_resolve_branch_url "http://github.com/org/repo/tree/my-branch" 2>/dev/null)
+  assert_eq "http tree url" "my-branch" "$result"
+
+  # Invalid inputs
+  _w_resolve_branch_url "feat/login" >/dev/null 2>&1
+  assert_exit_code "plain branch returns 1" "1" "$?"
+
+  _w_resolve_branch_url "https://github.com/org/repo/pull/42" >/dev/null 2>&1
+  assert_exit_code "pr url returns 1" "1" "$?"
+
+  _w_resolve_branch_url "https://gitlab.com/org/repo/tree/main" >/dev/null 2>&1
+  assert_exit_code "non-github tree url returns 1" "1" "$?"
+
+  _w_resolve_branch_url "https://github.com/org/repo/tree/" >/dev/null 2>&1
+  assert_exit_code "tree url without branch returns 1" "1" "$?"
+}
+
+test_add_branch_tree_url() {
+  echo "── w add <tree-url> ──"
+  local repo
+  repo=$(setup_repo "tree-url")
+
+  (
+    cd "$repo"
+    git checkout -b tree-url-branch >/dev/null 2>&1
+    echo "x" > tree-url.txt
+    git add tree-url.txt
+    git commit -m "tree url branch" >/dev/null 2>&1
+    git push origin tree-url-branch >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D tree-url-branch >/dev/null 2>&1
+  )
+
+  local output
+  output=$(cd "$repo" && w add "https://github.com/org/repo/tree/tree-url-branch" 2>&1)
+  assert_contains "shows resolved message" "$output" "Resolved branch URL"
+  assert_dir_exists "worktree created" "$TEST_ROOT/tree-url-worktrees/tree-url-branch"
+}
+
+test_add_slash_branch_tree_url() {
+  echo "── w add <tree-url> (slash branch) ──"
+  local repo
+  repo=$(setup_repo "tree-url-slash")
+
+  (
+    cd "$repo"
+    git checkout -b feat/tree-nested >/dev/null 2>&1
+    echo "x" > nested.txt
+    git add nested.txt
+    git commit -m "nested" >/dev/null 2>&1
+    git push origin feat/tree-nested >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D feat/tree-nested >/dev/null 2>&1
+  )
+
+  cd "$repo" && w add "https://github.com/org/repo/tree/feat/tree-nested" >/dev/null 2>&1
+  assert_dir_exists "slash branch worktree created" "$TEST_ROOT/tree-url-slash-worktrees/feat/tree-nested"
+}
+
+test_shortcut_tree_url() {
+  echo "── w <tree-url> shortcut ──"
+  local repo
+  repo=$(setup_repo "tree-shortcut")
+
+  (
+    cd "$repo"
+    git checkout -b tree-shortcut >/dev/null 2>&1
+    git push origin tree-shortcut >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D tree-shortcut >/dev/null 2>&1
+  )
+
+  local output
+  output=$(cd "$repo" && w "https://github.com/org/repo/tree/tree-shortcut" 2>&1)
+  assert_contains "shortcut resolves tree url" "$output" "Resolved branch URL"
+  assert_dir_exists "shortcut creates worktree" "$TEST_ROOT/tree-shortcut-worktrees/tree-shortcut"
+}
+
+# ── _w_resolve_pr_url ─────────────────────────────────────────────
+
+test_resolve_pr_url() {
+  echo "── _w_resolve_pr_url ──"
+
+  # Non-PR strings should return 1
+  _w_resolve_pr_url "feat/login" >/dev/null 2>&1
+  assert_exit_code "plain branch name returns 1" "1" "$?"
+
+  _w_resolve_pr_url "" >/dev/null 2>&1
+  assert_exit_code "empty string returns 1" "1" "$?"
+
+  _w_resolve_pr_url "https://gitlab.com/org/repo/merge_requests/42" >/dev/null 2>&1
+  assert_exit_code "non-github url returns 1" "1" "$?"
+
+  _w_resolve_pr_url "https://github.com/org/repo/pull/" >/dev/null 2>&1
+  assert_exit_code "url missing pr number returns 1" "1" "$?"
+
+  _w_resolve_pr_url "https://github.com/org/repo/issues/42" >/dev/null 2>&1
+  assert_exit_code "issues url returns 1" "1" "$?"
+
+  # Valid PR URL patterns — without gh available all should fail with the gh error,
+  # not with "not a PR URL" (i.e. pattern matching must succeed).
+  local output
+  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
+  assert_contains "https pull url reaches gh check" "$output" "gh CLI not installed"
+
+  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  assert_contains "https pulls url reaches gh check" "$output" "gh CLI not installed"
+
+  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
+  assert_contains "trailing slash url reaches gh check" "$output" "gh CLI not installed"
+
+  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
+  assert_contains "http pull url reaches gh check" "$output" "gh CLI not installed"
+
+  # /pulls/ must be normalised to /pull/ before gh is called —
+  # the gh error message (or "Failed to resolve") must not contain /pulls/
+  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  if [[ "$output" != *"/pulls/"* ]]; then
+    pass "/pulls/ normalised to /pull/ before gh call"
+  else
+    fail "/pulls/ was NOT normalised — still present in output"
+  fi
+}
+
+# ── w add: remote branch tracking ────────────────────────────────
+
+test_add_remote_branch_tracking() {
+  echo "── w add (remote branch tracking) ──"
+  local repo
+  repo=$(setup_repo "remote-track")
+
+  # Push a branch to the remote then delete the local copy so it only
+  # exists on origin — simulates a freshly pushed branch.
+  (
+    cd "$repo"
+    git checkout -b remote-only >/dev/null 2>&1
+    echo "remote" > remote-file.txt
+    git add remote-file.txt
+    git commit -m "remote branch commit" >/dev/null 2>&1
+    git push origin remote-only >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D remote-only >/dev/null 2>&1
+
+    w add remote-only >/dev/null 2>&1
+  )
+
+  local wt_dir="$TEST_ROOT/remote-track-worktrees/remote-only"
+  assert_dir_exists "worktree created for remote-only branch" "$wt_dir"
+
+  local branch
+  branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  assert_eq "worktree is on remote-only branch" "remote-only" "$branch"
+}
+
+test_add_remote_branch_upstream() {
+  echo "── w add (remote branch upstream tracking) ──"
+  local repo
+  repo=$(setup_repo "remote-upstream")
+
+  (
+    cd "$repo"
+    git checkout -b tracked-remote >/dev/null 2>&1
+    echo "x" > tracked.txt
+    git add tracked.txt
+    git commit -m "tracked" >/dev/null 2>&1
+    git push origin tracked-remote >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D tracked-remote >/dev/null 2>&1
+
+    w add tracked-remote >/dev/null 2>&1
+  )
+
+  local wt_dir="$TEST_ROOT/remote-upstream-worktrees/tracked-remote"
+  local upstream
+  upstream=$(git -C "$wt_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+  assert_eq "remote branch has upstream tracking" "origin/tracked-remote" "$upstream"
+}
+
+test_add_remote_branch_message() {
+  echo "── w add (remote branch output message) ──"
+  local repo
+  repo=$(setup_repo "remote-msg")
+
+  (
+    cd "$repo"
+    git checkout -b msg-remote >/dev/null 2>&1
+    echo "x" > msg.txt
+    git add msg.txt
+    git commit -m "msg" >/dev/null 2>&1
+    git push origin msg-remote >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+    git branch -D msg-remote >/dev/null 2>&1
+  )
+
+  local output
+  output=$(cd "$repo" && w add msg-remote 2>&1)
+  assert_contains "output mentions tracking origin" "$output" "tracking origin/msg-remote"
+}
+
+# ── w add PR URL (no gh CLI) ──────────────────────────────────────
+
+test_add_pr_url_no_gh() {
+  echo "── w add <pr-url> (no gh CLI) ──"
+  local repo
+  repo=$(setup_repo "pr-url-no-gh")
+
+  (
+    cd "$repo"
+    local output
+    output=$(PATH="/usr/bin:/bin" w add "https://github.com/org/repo/pull/1" 2>&1)
+    assert_contains "w add pr-url without gh errors" "$output" "gh CLI not installed"
+  )
+}
+
+test_shortcut_pr_url_no_gh() {
+  echo "── w <pr-url> shortcut (no gh CLI) ──"
+  local repo
+  repo=$(setup_repo "pr-shortcut-no-gh")
+
+  (
+    cd "$repo"
+    local output
+    output=$(PATH="/usr/bin:/bin" w "https://github.com/org/repo/pull/1" 2>&1)
+    assert_contains "w pr-url shortcut without gh errors" "$output" "gh CLI not installed"
+  )
+}
+
+# ── w add --help updated content ─────────────────────────────────
+
+test_add_help_pr_url() {
+  echo "── w add --help (PR URL / branch URL content) ──"
+  local output
+  output=$(w add --help 2>&1)
+  assert_contains "add help mentions github-pr-url" "$output" "github-pr-url"
+  assert_contains "add help mentions github-branch-url" "$output" "github-branch-url"
+  assert_contains "add help shows Examples section" "$output" "Examples:"
+}
+
+# ── w help: pr-url entry ─────────────────────────────────────────
+
+test_help_pr_url_entry() {
+  echo "── w help (pr-url line) ──"
+  local output
+  output=$(w help 2>&1)
+  assert_contains "help shows pr-url entry" "$output" "pr-url"
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -897,6 +1161,18 @@ test_clone_with_branch
 test_clone_no_url
 test_clone_already_exists
 test_clone_help
+test_resolve_branch_url
+test_add_branch_tree_url
+test_add_slash_branch_tree_url
+test_shortcut_tree_url
+test_resolve_pr_url
+test_add_remote_branch_tracking
+test_add_remote_branch_upstream
+test_add_remote_branch_message
+test_add_pr_url_no_gh
+test_shortcut_pr_url_no_gh
+test_add_help_pr_url
+test_help_pr_url_entry
 
 # ── Summary ────────────────────────────────────────────────────────
 
