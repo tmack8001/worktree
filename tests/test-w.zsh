@@ -869,8 +869,8 @@ test_resolve_branch_url() {
   result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/my-feature" 2>/dev/null)
   assert_eq "slash branch" "feat/my-feature" "$result"
 
-  result=$(_w_resolve_branch_url "https://github.com/djohnsonigra/gigascale-scribes/tree/claude/quirky-kapitsa-7274a7" 2>/dev/null)
-  assert_eq "deeply nested branch" "claude/quirky-kapitsa-7274a7" "$result"
+  result=$(_w_resolve_branch_url "worktrees/tree/claude/pink-dolphins-7864b7" 2>/dev/null)
+  assert_eq "deeply nested branch" "claude/pink-dolphins-7864b7" "$result"
 
   result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/foo/" 2>/dev/null)
   assert_eq "strips trailing slash" "feat/foo" "$result"
