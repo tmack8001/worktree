@@ -456,7 +456,7 @@ TOML
 }
 
 @test "_w_resolve_branch_url: extracts deeply nested branch" {
-  result=$(_w_resolve_branch_url "https://github.com/djohnsonigra/gigascale-scribes/tree/claude/quirky-kapitsa-7274a7")
+  result=$(_w_resolve_branch_url "https://github.com/tmack/worktrees/tree/claude/pink-dolphins-7864b7")
   [ "$result" = "claude/quirky-kapitsa-7274a7" ]
 }
 
