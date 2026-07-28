@@ -174,22 +174,22 @@ If the branch changes its dependencies, a follow-up install (e.g. `npm install`)
 
 ### Declaring dep dirs per project
 
-The built-in list (`node_modules`, `vendor`) covers common cases, but a project can declare its own in `.worktree.toml` — committed and shared with the team. Declarations are **additive**: a top-level `dep_dirs` extends the built-ins, and a matched `[profile.X]` `dep_dirs` extends that. Nothing replaces, so different branch types can each pull in what they need:
+The built-in list (`node_modules`, `vendor`) covers common cases, but a project can declare its own in `.worktree.toml` — committed and shared with the team. A **top-level `dep_dirs` replaces the built-in defaults** and becomes the repo's base set; a matched `[profile.X]` `dep_dirs` then **extends** that base for its branches:
 
 ```toml
-# repo-wide, on top of the built-in node_modules + vendor
-dep_dirs = "packages/shared/node_modules"
+# base set for every worktree — replaces the built-in node_modules + vendor
+dep_dirs = "node_modules packages/shared/node_modules"
 
 [profile.frontend]
 branches = "fe/*, ui/*"
-dep_dirs = "apps/web/node_modules"     # added for fe/* and ui/* branches
+dep_dirs = "apps/web/node_modules"     # added on top of the base for fe/* and ui/*
 
 [profile.backend]
 branches = "be/*, api/*"
-dep_dirs = ".gradle vendor"            # added for be/* and api/* branches
+dep_dirs = ".gradle vendor"            # added on top of the base for be/* and api/*
 ```
 
-Values are space-separated dir names matched at any depth (like the built-ins). A profile's `dep_dirs` is unioned with the top-level one and the built-ins, then deduplicated.
+Values are space-separated dir names matched at any depth. The base is the top-level `dep_dirs` (or the built-ins if there's no top-level key); a matched profile's `dep_dirs` is unioned onto it and deduplicated. If you set a top-level `dep_dirs`, remember to include `node_modules`/`vendor` there if you still want them, since it replaces the defaults.
 
 | Variable | Effect |
 |----------|--------|

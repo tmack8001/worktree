@@ -334,12 +334,12 @@ _w_run_setup() {
 # and shares disk blocks until something writes. We clone rather than
 # symlink so a later install in the worktree can't corrupt the main repo.
 #
-# Which dirs get cloned is resolved ADDITIVELY (see _w_resolve_dep_dirs):
-#   built-in defaults (node_modules vendor)
-#     + top-level  dep_dirs  in .worktree.toml
-#     + matched    [profile.X] dep_dirs  in .worktree.toml
-# Nothing in the toml *replaces*; a profile extends the top-level, which
-# extends the built-ins — so fe/* and be/* can each add their own dirs.
+# Which dirs get cloned (see _w_resolve_dep_dirs):
+#   base  = top-level dep_dirs in .worktree.toml, if set  (REPLACES the
+#           built-in node_modules + vendor); otherwise the built-in defaults
+#   final = base + matched [profile.X] dep_dirs           (the profile EXTENDS)
+# So a top-level dep_dirs defines the repo's base set, and each profile adds
+# to it for its own branches (fe/*, be/*, …).
 #
 #   WORKTREE_NO_DEP_BOOTSTRAP=1   disable entirely
 #   WORKTREE_DEP_DIRS="a b c"     imperative override — replaces the whole set
@@ -377,16 +377,21 @@ _w_resolve_dep_dirs() {
     return 0
   fi
 
-  local -aU dirs=(node_modules vendor)     # -U keeps the array deduplicated
-  local cfg="$repo/.worktree.toml"
-  if [[ -f "$cfg" ]]; then
-    local top prof
-    top=$(_w_toml_top_dep_dirs "$cfg")
-    [[ -n "$top" ]] && dirs+=(${=top})
-    if _w_load_config "$cfg" "$branch" 2>/dev/null; then
-      prof="${W_PROFILE[dep_dirs]:-}"
-      [[ -n "$prof" ]] && dirs+=(${=prof})
-    fi
+  local cfg="$repo/.worktree.toml" top=""
+  [[ -f "$cfg" ]] && top=$(_w_toml_top_dep_dirs "$cfg")
+
+  # A top-level dep_dirs REPLACES the built-in defaults; otherwise use them.
+  local -aU dirs                           # -U keeps the array deduplicated
+  if [[ -n "$top" ]]; then
+    dirs=(${=top})
+  else
+    dirs=(node_modules vendor)
+  fi
+
+  # The matched profile's dep_dirs (if any) extends the base set.
+  if [[ -f "$cfg" ]] && _w_load_config "$cfg" "$branch" 2>/dev/null; then
+    local prof="${W_PROFILE[dep_dirs]:-}"
+    [[ -n "$prof" ]] && dirs+=(${=prof})
   fi
   print -rl -- $dirs
 }
@@ -1183,8 +1188,8 @@ _w_help() {
   printf "       from the main repo into the new worktree via copy-on-write, so it is\n"
   printf "       buildable immediately. If the branch changes deps, a follow-up install\n"
   printf "       (e.g. ${dim}npm install${reset}) only fetches the delta.\n"
-  printf "       Declare more with a ${bold}dep_dirs${reset} key in .worktree.toml — top-level and\n"
-  printf "       per-${dim}[profile]${reset} entries are additive (a profile extends the top-level).\n"
+  printf "       Declare deps with a ${bold}dep_dirs${reset} key in .worktree.toml: a top-level value\n"
+  printf "       replaces the built-in defaults, and each ${dim}[profile]${reset} extends the base.\n"
   printf "       ${yellow}WORKTREE_DEP_DIRS${reset}=\"a b c\"     replace the whole set ${dim}(venv is not relocatable)${reset}\n"
   printf "       ${yellow}WORKTREE_NO_DEP_BOOTSTRAP=1${reset}   disable\n\n"
   printf "${dim}Run any subcommand with --help for more detail, e.g. worktree add --help${reset}\n"

@@ -10,9 +10,10 @@
 # Base branch for new worktrees. Auto-detected from origin HEAD if omitted.
 base_branch = "main"
 
-# Extra dependency dirs to clone into a new worktree, on top of the built-in
-# node_modules + vendor. Additive: a profile's dep_dirs extends this list.
-dep_dirs = "packages/shared/node_modules"
+# Base set of dependency dirs to clone into a new worktree. A top-level
+# dep_dirs REPLACES the built-in node_modules + vendor, so list what you want
+# here. Each profile's dep_dirs then extends this base for its branches.
+dep_dirs = "node_modules packages/shared/node_modules"
 
 # ── Frontend branches ──────────────────────────────────────────────
 

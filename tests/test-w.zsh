@@ -1218,17 +1218,29 @@ TOML
 
   local res
   res=$(_w_resolve_dep_dirs "$repo" "fe/x" | tr '\n' ' '); res="${res% }"
-  assert_eq "profile extends top-level extends defaults" \
-    "node_modules vendor shared_vendor frontend/node_modules" "$res"
+  assert_eq "top-level replaces defaults, profile extends it" \
+    "shared_vendor frontend/node_modules" "$res"
 
   res=$(_w_resolve_dep_dirs "$repo" "random-branch" | tr '\n' ' '); res="${res% }"
-  assert_eq "unmatched branch: defaults + top-level only" \
-    "node_modules vendor shared_vendor" "$res"
+  assert_eq "unmatched branch: top-level base only" \
+    "shared_vendor" "$res"
 
   res=$(WORKTREE_DEP_DIRS="only_this" _w_resolve_dep_dirs "$repo" "fe/x" | tr '\n' ' '); res="${res% }"
   assert_eq "env var replaces the whole set" "only_this" "$res"
 
-  # end-to-end: the additive set is actually cloned into the worktree
+  # no top-level dep_dirs: profile extends the built-in defaults
+  local repo_nb
+  repo_nb=$(setup_repo "dep-nobase")
+  cat > "$repo_nb/.worktree.toml" <<'TOML'
+[profile.frontend]
+branches = "fe/*"
+dep_dirs = "frontend/node_modules"
+TOML
+  res=$(_w_resolve_dep_dirs "$repo_nb" "fe/x" | tr '\n' ' '); res="${res% }"
+  assert_eq "no top-level: profile extends built-ins" \
+    "node_modules vendor frontend/node_modules" "$res"
+
+  # end-to-end: top-level replaces built-ins, profile extends the clone
   local repo2
   repo2=$(setup_repo "dep-toml-e2e")
   cat > "$repo2/.worktree.toml" <<'TOML'
@@ -1245,9 +1257,9 @@ TOML
     echo x > "$repo2/shared_vendor/m"
     echo x > "$repo2/extra_pkgs/m"
     w add e2e >/dev/null 2>&1
-    assert_dir_exists "builtin node_modules cloned" \
+    assert_dir_not_exists "builtin node_modules replaced by top-level" \
       "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/node_modules"
-    assert_dir_exists "top-level dep dir cloned" \
+    assert_dir_exists "top-level base dir cloned" \
       "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/shared_vendor"
     assert_dir_exists "profile dep dir cloned" \
       "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/extra_pkgs"
