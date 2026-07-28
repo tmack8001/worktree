@@ -164,6 +164,21 @@ w dev               # launch tmux with defined windows
 w dev               # reattaches to existing session
 ```
 
+## Dependency bootstrap
+
+Installed dependency directories (`node_modules`, `vendor`) are typically `.gitignore`d, so `git worktree add` never populates them — a brand-new worktree can't build or test until they exist. On `w add` (and `w <branch>`), these dirs are **cloned from the main repo into the new worktree** so it's usable immediately.
+
+The clone uses **copy-on-write** where the filesystem supports it (APFS `clonefile` on macOS, reflink on Linux with GNU coreutils), so it's near-instant and shares disk blocks until something writes. It clones rather than symlinks, so a later `npm install` in the worktree can't corrupt the main repo's dependencies. Dep dirs at any depth are handled (e.g. `frontend/node_modules`), and anything already present in the worktree (such as a committed `vendor/`) is left untouched.
+
+If the branch changes its dependencies, a follow-up install (e.g. `npm install`) only fetches the delta — a copied `node_modules` is a fast baseline, not a substitute for install.
+
+| Variable | Effect |
+|----------|--------|
+| `WORKTREE_NO_DEP_BOOTSTRAP=1` | Disable the clone entirely |
+| `WORKTREE_DEP_DIRS="a b c"` | Override the dir list (space-separated) |
+
+The default list is limited to *relocatable* dep dirs. Python virtualenvs (`.venv`/`venv`) are **excluded by default** because their `activate` scripts and shebangs hardcode the absolute path and don't survive a move — add them via `WORKTREE_DEP_DIRS` only if you know yours tolerates relocation.
+
 ## Progress indicators
 
 - 📦 cloning a repo

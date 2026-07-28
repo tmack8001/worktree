@@ -324,6 +324,82 @@ _w_run_setup() {
   done
 }
 
+# ── Dependency bootstrap ───────────────────────────────────────────
+#
+# Copy the main repo's installed dependency dirs (node_modules, vendor, …)
+# into a freshly-created worktree. These are typically gitignored, so
+# `git worktree add` never populates them — a new worktree can't build or
+# test until they exist. We clone them with copy-on-write where the
+# filesystem supports it (APFS clonefile / reflink) so it's near-instant
+# and shares disk blocks until something writes. We clone rather than
+# symlink so a later install in the worktree can't corrupt the main repo.
+#
+#   WORKTREE_NO_DEP_BOOTSTRAP=1   disable entirely
+#   WORKTREE_DEP_DIRS="a b c"     override the dir list (space-separated)
+#
+# The default list is limited to *relocatable* dep dirs. Python venvs are
+# NOT relocatable (activate scripts + shebangs hardcode the path) and are
+# intentionally excluded from the default — add them via WORKTREE_DEP_DIRS
+# only if you know your venv tolerates a move.
+_w_bootstrap_deps() {
+  local repo="$1" dest="$2"
+
+  [[ -n "${WORKTREE_NO_DEP_BOOTSTRAP:-}" ]] && return 0
+
+  # A bare main repo has no working tree to copy deps from.
+  [[ "$(git -C "$repo" rev-parse --is-bare-repository 2>/dev/null)" == true ]] && return 0
+
+  local -a dep_dirs
+  if [[ -n "${WORKTREE_DEP_DIRS:-}" ]]; then
+    dep_dirs=(${=WORKTREE_DEP_DIRS})
+  else
+    dep_dirs=(node_modules vendor)
+  fi
+  (( ${#dep_dirs[@]} )) || return 0
+
+  # Pick the fastest copy the filesystem / coreutils supports.
+  local -a copy_cmd
+  if cp --version 2>/dev/null | grep -q 'GNU coreutils'; then
+    copy_cmd=(cp -a --reflink=auto)          # Linux: reflink when possible
+  else
+    local _t1 _t2                            # macOS/BSD: probe clonefile(2)
+    _t1=$(mktemp 2>/dev/null) && _t2="${_t1}.wclone"
+    if [[ -n "$_t1" ]] && cp -c "$_t1" "$_t2" 2>/dev/null; then
+      copy_cmd=(cp -Rc)                      # APFS copy-on-write clone
+    else
+      copy_cmd=(cp -R)                       # last resort: plain recursive copy
+    fi
+    rm -f "$_t1" "$_t2" 2>/dev/null
+  fi
+
+  # Build a find predicate: \( -name node_modules -o -name vendor \)
+  local -a find_expr=()
+  local n first=1
+  for n in "${dep_dirs[@]}"; do
+    (( first )) || find_expr+=(-o)
+    find_expr+=(-name "$n")
+    first=0
+  done
+
+  # Find each dep dir at any depth, but -prune so we never descend into one
+  # (skips nested node_modules and keeps it fast).
+  local src rel target count=0
+  while IFS= read -r src; do
+    src="${src#./}"
+    [[ -z "$src" || "$src" == "." ]] && continue
+    target="$dest/$src"
+    [[ -e "$target" ]] && continue           # worktree already has it
+    mkdir -p "${target:h}"
+    if "${copy_cmd[@]}" "$repo/$src" "$target" 2>/dev/null; then
+      echo "  📦 deps: $src"
+      (( count++ ))
+    fi
+  done < <(cd "$repo" && find . -type d '(' "${find_expr[@]}" ')' -prune -print 2>/dev/null)
+
+  (( count )) && echo "  ✅ ${count} dependency dir(s) cloned into worktree"
+  return 0
+}
+
 _w_dev() {
   local dest="$1" branch="$2" repo="$3"
   local config_file="$repo/.worktree.toml"
@@ -494,6 +570,10 @@ EOF
     if [[ $? -eq 0 ]]; then
       cd "$dest"
 
+      # No-op for a bare clone (no working tree to copy from), kept for
+      # symmetry so a non-bare source would still bootstrap.
+      _w_bootstrap_deps "$bare_dir" "$dest"
+
       # Run setup if .worktree.toml exists in the worktree
       if [[ -f "$dest/.worktree.toml" ]]; then
         _w_run_setup "$dest" "$bare_dir" "$branch"
@@ -609,6 +689,7 @@ EOF
   if [[ $wt_ok -eq 0 ]]; then
     cd "$dest"
     echo "  ✅ $(_w_short_path "$dest")"
+    _w_bootstrap_deps "$repo" "$dest"
   fi
 
   # Run config-driven setup if .worktree.toml exists
@@ -1051,5 +1132,12 @@ _w_help() {
   printf "       Place a ${bold}.worktree.toml${reset} in your repo root to define setup commands\n"
   printf "       and tmux dev sessions per branch pattern.\n"
   printf "       Run ${cyan}worktree${reset} ${yellow}dev --help${reset} for the full config format and examples.\n\n"
+  printf "${bold}DEPENDENCY BOOTSTRAP${reset}\n"
+  printf "       On ${cyan}add${reset}, gitignored dependency dirs (${dim}node_modules, vendor${reset}) are cloned\n"
+  printf "       from the main repo into the new worktree via copy-on-write, so it is\n"
+  printf "       buildable immediately. If the branch changes deps, a follow-up install\n"
+  printf "       (e.g. ${dim}npm install${reset}) only fetches the delta.\n"
+  printf "       ${yellow}WORKTREE_NO_DEP_BOOTSTRAP=1${reset}   disable\n"
+  printf "       ${yellow}WORKTREE_DEP_DIRS${reset}=\"a b c\"     override the dir list ${dim}(venv is not relocatable)${reset}\n\n"
   printf "${dim}Run any subcommand with --help for more detail, e.g. worktree add --help${reset}\n"
 }

@@ -657,6 +657,59 @@ TOML
   [ "$setup" = "echo hello" ]
 }
 
+# ── dependency bootstrap ───────────────────────────────────────────
+
+@test "w add: clones node_modules into the new worktree" {
+  mkdir -p "$REPO/node_modules/pkg"
+  echo "module.exports = 1" > "$REPO/node_modules/pkg/index.js"
+  cd "$REPO"
+  worktree add deps-basic 2>/dev/null
+  [ -f "$WTS/deps-basic/node_modules/pkg/index.js" ]
+}
+
+@test "w add: clones a nested dep dir at its relative path" {
+  mkdir -p "$REPO/frontend/node_modules/pkg"
+  echo "x" > "$REPO/frontend/node_modules/pkg/index.js"
+  cd "$REPO"
+  worktree add deps-nested 2>/dev/null
+  [ -f "$WTS/deps-nested/frontend/node_modules/pkg/index.js" ]
+}
+
+@test "w add: WORKTREE_NO_DEP_BOOTSTRAP=1 skips the clone" {
+  mkdir -p "$REPO/node_modules/pkg"
+  echo "x" > "$REPO/node_modules/pkg/index.js"
+  ( export WORKTREE_NO_DEP_BOOTSTRAP=1; cd "$REPO"; worktree add deps-off 2>/dev/null )
+  [ ! -d "$WTS/deps-off/node_modules" ]
+}
+
+@test "w add: WORKTREE_DEP_DIRS overrides the dir list" {
+  mkdir -p "$REPO/.venv/bin"
+  echo "x" > "$REPO/.venv/bin/activate"
+  # node_modules present but NOT in the override list — must be skipped
+  mkdir -p "$REPO/node_modules"
+  echo "x" > "$REPO/node_modules/marker"
+  ( export WORKTREE_DEP_DIRS=".venv"; cd "$REPO"; worktree add deps-override 2>/dev/null )
+  [ -f "$WTS/deps-override/.venv/bin/activate" ]
+  [ ! -d "$WTS/deps-override/node_modules" ]
+}
+
+@test "_w_bootstrap_deps: does not clobber a dep dir already in the worktree" {
+  mkdir -p "$REPO/vendor"
+  echo "fresh" > "$REPO/vendor/lib"
+  dest="$TEST_DIR/preexist"
+  mkdir -p "$dest/vendor"
+  echo "PREEXISTING" > "$dest/vendor/lib"
+  _w_bootstrap_deps "$REPO" "$dest"
+  [ "$(cat "$dest/vendor/lib")" = "PREEXISTING" ]
+}
+
+@test "_w_bootstrap_deps: bare repo is a no-op" {
+  dest="$TEST_DIR/from-bare"
+  mkdir -p "$dest"
+  _w_bootstrap_deps "$TEST_DIR/remote.git" "$dest"
+  [ -z "$(ls -A "$dest")" ]
+}
+
 @test "_w_load_config: parses session override and window fields" {
   cat > "$TEST_DIR/test.toml" <<'TOML'
 [profile.frontend]

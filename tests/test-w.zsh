@@ -869,7 +869,7 @@ test_resolve_branch_url() {
   result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/my-feature" 2>/dev/null)
   assert_eq "slash branch" "feat/my-feature" "$result"
 
-  result=$(_w_resolve_branch_url "worktrees/tree/claude/pink-dolphins-7864b7" 2>/dev/null)
+  result=$(_w_resolve_branch_url "https://github.com/tmack/worktrees/tree/claude/pink-dolphins-7864b7" 2>/dev/null)
   assert_eq "deeply nested branch" "claude/pink-dolphins-7864b7" "$result"
 
   result=$(_w_resolve_branch_url "https://github.com/org/repo/tree/feat/foo/" 2>/dev/null)
@@ -1122,6 +1122,85 @@ test_help_pr_url_entry() {
   assert_contains "help shows pr-url entry" "$output" "pr-url"
 }
 
+# ── dependency bootstrap ──────────────────────────────────────────
+
+test_bootstrap_deps() {
+  echo "── _w_bootstrap_deps ──"
+  local repo
+  repo=$(setup_repo "deps")
+
+  # node_modules at root is cloned into the new worktree
+  (
+    cd "$repo"
+    mkdir -p "$repo/node_modules/pkg"
+    echo "module.exports = 1" > "$repo/node_modules/pkg/index.js"
+    w add deps-basic >/dev/null 2>&1
+    assert_dir_exists "node_modules cloned" "$TEST_ROOT/deps-worktrees/deps-basic/node_modules"
+    if [[ -f "$TEST_ROOT/deps-worktrees/deps-basic/node_modules/pkg/index.js" ]]; then
+      pass "node_modules contents cloned"
+    else
+      fail "node_modules contents not cloned"
+    fi
+  )
+
+  # nested dep dir is cloned at its relative path
+  local repo2
+  repo2=$(setup_repo "deps-nested")
+  (
+    cd "$repo2"
+    mkdir -p "$repo2/frontend/node_modules/pkg"
+    echo "x" > "$repo2/frontend/node_modules/pkg/index.js"
+    w add nested >/dev/null 2>&1
+    assert_dir_exists "nested node_modules cloned" \
+      "$TEST_ROOT/deps-nested-worktrees/nested/frontend/node_modules"
+  )
+
+  # WORKTREE_NO_DEP_BOOTSTRAP disables the clone
+  local repo3
+  repo3=$(setup_repo "deps-off")
+  (
+    cd "$repo3"
+    mkdir -p "$repo3/node_modules/pkg"
+    echo "x" > "$repo3/node_modules/pkg/index.js"
+    WORKTREE_NO_DEP_BOOTSTRAP=1 w add off >/dev/null 2>&1
+    assert_dir_not_exists "bootstrap disabled by env" \
+      "$TEST_ROOT/deps-off-worktrees/off/node_modules"
+  )
+
+  # WORKTREE_DEP_DIRS overrides which dirs are copied
+  local repo4
+  repo4=$(setup_repo "deps-override")
+  (
+    cd "$repo4"
+    mkdir -p "$repo4/.venv/bin" "$repo4/node_modules"
+    echo "x" > "$repo4/.venv/bin/activate"
+    echo "x" > "$repo4/node_modules/marker"
+    WORKTREE_DEP_DIRS=".venv" w add override >/dev/null 2>&1
+    assert_dir_exists "override dir cloned" "$TEST_ROOT/deps-override-worktrees/override/.venv"
+    assert_dir_not_exists "non-override dir skipped" \
+      "$TEST_ROOT/deps-override-worktrees/override/node_modules"
+  )
+
+  # does not clobber a dep dir already present in the worktree
+  local repo5
+  repo5=$(setup_repo "deps-existing")
+  mkdir -p "$repo5/vendor"; echo "fresh" > "$repo5/vendor/lib"
+  local dest="$TEST_ROOT/preexist-dest"
+  mkdir -p "$dest/vendor"; echo "PREEXISTING" > "$dest/vendor/lib"
+  _w_bootstrap_deps "$repo5" "$dest"
+  assert_eq "existing dep dir not clobbered" "PREEXISTING" "$(cat "$dest/vendor/lib")"
+
+  # bare repo is a no-op (nothing to copy from)
+  local bare_dest="$TEST_ROOT/from-bare-dest"
+  mkdir -p "$bare_dest"
+  _w_bootstrap_deps "$TEST_ROOT/deps-bare.git" "$bare_dest"
+  if [[ -z "$(ls -A "$bare_dest")" ]]; then
+    pass "bare repo bootstrap is a no-op"
+  else
+    fail "bare repo bootstrap copied something"
+  fi
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -1173,6 +1252,7 @@ test_add_pr_url_no_gh
 test_shortcut_pr_url_no_gh
 test_add_help_pr_url
 test_help_pr_url_entry
+test_bootstrap_deps
 
 # ── Summary ────────────────────────────────────────────────────────
 
