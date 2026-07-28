@@ -10,10 +10,15 @@
 # Base branch for new worktrees. Auto-detected from origin HEAD if omitted.
 base_branch = "main"
 
+# Extra dependency dirs to clone into a new worktree, on top of the built-in
+# node_modules + vendor. Additive: a profile's dep_dirs extends this list.
+dep_dirs = "packages/shared/node_modules"
+
 # ── Frontend branches ──────────────────────────────────────────────
 
 [profile.frontend]
 branches = "fe/*, frontend/*, ui/*"
+dep_dirs = "apps/web/node_modules"     # cloned in addition to the top-level list
 
 # Runs once on `worktree add` — environment setup, dependency install
 [[profile.frontend.setup]]
@@ -39,6 +44,7 @@ run = "make run-fe"
 
 [profile.backend]
 branches = "be/*, backend/*, api/*"
+dep_dirs = ".gradle vendor"
 
 [[profile.backend.setup]]
 run = "direnv allow ."

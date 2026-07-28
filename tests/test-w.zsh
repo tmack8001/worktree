@@ -1201,6 +1201,59 @@ test_bootstrap_deps() {
   fi
 }
 
+test_dep_dirs_toml() {
+  echo "── _w_resolve_dep_dirs (.worktree.toml) ──"
+  local repo
+  repo=$(setup_repo "dep-toml")
+  cat > "$repo/.worktree.toml" <<'TOML'
+dep_dirs = "shared_vendor"
+
+[profile.frontend]
+branches = "fe/*, ui/*"
+dep_dirs = "frontend/node_modules"
+
+[profile.default]
+branches = "*"
+TOML
+
+  local res
+  res=$(_w_resolve_dep_dirs "$repo" "fe/x" | tr '\n' ' '); res="${res% }"
+  assert_eq "profile extends top-level extends defaults" \
+    "node_modules vendor shared_vendor frontend/node_modules" "$res"
+
+  res=$(_w_resolve_dep_dirs "$repo" "random-branch" | tr '\n' ' '); res="${res% }"
+  assert_eq "unmatched branch: defaults + top-level only" \
+    "node_modules vendor shared_vendor" "$res"
+
+  res=$(WORKTREE_DEP_DIRS="only_this" _w_resolve_dep_dirs "$repo" "fe/x" | tr '\n' ' '); res="${res% }"
+  assert_eq "env var replaces the whole set" "only_this" "$res"
+
+  # end-to-end: the additive set is actually cloned into the worktree
+  local repo2
+  repo2=$(setup_repo "dep-toml-e2e")
+  cat > "$repo2/.worktree.toml" <<'TOML'
+dep_dirs = "shared_vendor"
+
+[profile.default]
+branches = "*"
+dep_dirs = "extra_pkgs"
+TOML
+  (
+    cd "$repo2"
+    mkdir -p "$repo2/node_modules" "$repo2/shared_vendor" "$repo2/extra_pkgs"
+    echo x > "$repo2/node_modules/m"
+    echo x > "$repo2/shared_vendor/m"
+    echo x > "$repo2/extra_pkgs/m"
+    w add e2e >/dev/null 2>&1
+    assert_dir_exists "builtin node_modules cloned" \
+      "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/node_modules"
+    assert_dir_exists "top-level dep dir cloned" \
+      "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/shared_vendor"
+    assert_dir_exists "profile dep dir cloned" \
+      "$TEST_ROOT/dep-toml-e2e-worktrees/e2e/extra_pkgs"
+  )
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -1253,6 +1306,7 @@ test_shortcut_pr_url_no_gh
 test_add_help_pr_url
 test_help_pr_url_entry
 test_bootstrap_deps
+test_dep_dirs_toml
 
 # ── Summary ────────────────────────────────────────────────────────
 

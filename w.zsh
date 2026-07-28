@@ -334,15 +334,65 @@ _w_run_setup() {
 # and shares disk blocks until something writes. We clone rather than
 # symlink so a later install in the worktree can't corrupt the main repo.
 #
-#   WORKTREE_NO_DEP_BOOTSTRAP=1   disable entirely
-#   WORKTREE_DEP_DIRS="a b c"     override the dir list (space-separated)
+# Which dirs get cloned is resolved ADDITIVELY (see _w_resolve_dep_dirs):
+#   built-in defaults (node_modules vendor)
+#     + top-level  dep_dirs  in .worktree.toml
+#     + matched    [profile.X] dep_dirs  in .worktree.toml
+# Nothing in the toml *replaces*; a profile extends the top-level, which
+# extends the built-ins — so fe/* and be/* can each add their own dirs.
 #
-# The default list is limited to *relocatable* dep dirs. Python venvs are
+#   WORKTREE_NO_DEP_BOOTSTRAP=1   disable entirely
+#   WORKTREE_DEP_DIRS="a b c"     imperative override — replaces the whole set
+#
+# The built-in list is limited to *relocatable* dep dirs. Python venvs are
 # NOT relocatable (activate scripts + shebangs hardcode the path) and are
-# intentionally excluded from the default — add them via WORKTREE_DEP_DIRS
+# intentionally excluded — add them via a dep_dirs key or WORKTREE_DEP_DIRS
 # only if you know your venv tolerates a move.
+
+# Read a top-level (outside any [profile]) dep_dirs value from a config file.
+_w_toml_top_dep_dirs() {
+  local cfg="$1" line
+  [[ -f "$cfg" ]] || return 1
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line#"${line%%[! ]*}"}"
+    line="${line%"${line##*[! ]}"}"
+    [[ "$line" =~ '^\[' ]] && break        # stop at first section header
+    if [[ "$line" =~ '^dep_dirs[[:space:]]*=[[:space:]]*"(.*)"$' ]]; then
+      echo "${match[1]}"
+      return 0
+    fi
+  done < "$cfg"
+  return 1
+}
+
+# Resolve the effective dependency-dir list for a branch, one per line.
+# WORKTREE_DEP_DIRS replaces everything; otherwise built-ins + top-level
+# dep_dirs + matched-profile dep_dirs, deduplicated (order preserved).
+_w_resolve_dep_dirs() {
+  local repo="$1" branch="$2"
+
+  if [[ -n "${WORKTREE_DEP_DIRS:-}" ]]; then
+    print -rl -- ${=WORKTREE_DEP_DIRS}
+    return 0
+  fi
+
+  local -aU dirs=(node_modules vendor)     # -U keeps the array deduplicated
+  local cfg="$repo/.worktree.toml"
+  if [[ -f "$cfg" ]]; then
+    local top prof
+    top=$(_w_toml_top_dep_dirs "$cfg")
+    [[ -n "$top" ]] && dirs+=(${=top})
+    if _w_load_config "$cfg" "$branch" 2>/dev/null; then
+      prof="${W_PROFILE[dep_dirs]:-}"
+      [[ -n "$prof" ]] && dirs+=(${=prof})
+    fi
+  fi
+  print -rl -- $dirs
+}
+
 _w_bootstrap_deps() {
-  local repo="$1" dest="$2"
+  local repo="$1" dest="$2" branch="${3:-}"
 
   [[ -n "${WORKTREE_NO_DEP_BOOTSTRAP:-}" ]] && return 0
 
@@ -350,11 +400,7 @@ _w_bootstrap_deps() {
   [[ "$(git -C "$repo" rev-parse --is-bare-repository 2>/dev/null)" == true ]] && return 0
 
   local -a dep_dirs
-  if [[ -n "${WORKTREE_DEP_DIRS:-}" ]]; then
-    dep_dirs=(${=WORKTREE_DEP_DIRS})
-  else
-    dep_dirs=(node_modules vendor)
-  fi
+  dep_dirs=(${(f)"$(_w_resolve_dep_dirs "$repo" "$branch")"})
   (( ${#dep_dirs[@]} )) || return 0
 
   # Pick the fastest copy the filesystem / coreutils supports.
@@ -572,7 +618,7 @@ EOF
 
       # No-op for a bare clone (no working tree to copy from), kept for
       # symmetry so a non-bare source would still bootstrap.
-      _w_bootstrap_deps "$bare_dir" "$dest"
+      _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
 
       # Run setup if .worktree.toml exists in the worktree
       if [[ -f "$dest/.worktree.toml" ]]; then
@@ -689,7 +735,7 @@ EOF
   if [[ $wt_ok -eq 0 ]]; then
     cd "$dest"
     echo "  ✅ $(_w_short_path "$dest")"
-    _w_bootstrap_deps "$repo" "$dest"
+    _w_bootstrap_deps "$repo" "$dest" "$branch"
   fi
 
   # Run config-driven setup if .worktree.toml exists
@@ -1137,7 +1183,9 @@ _w_help() {
   printf "       from the main repo into the new worktree via copy-on-write, so it is\n"
   printf "       buildable immediately. If the branch changes deps, a follow-up install\n"
   printf "       (e.g. ${dim}npm install${reset}) only fetches the delta.\n"
-  printf "       ${yellow}WORKTREE_NO_DEP_BOOTSTRAP=1${reset}   disable\n"
-  printf "       ${yellow}WORKTREE_DEP_DIRS${reset}=\"a b c\"     override the dir list ${dim}(venv is not relocatable)${reset}\n\n"
+  printf "       Declare more with a ${bold}dep_dirs${reset} key in .worktree.toml — top-level and\n"
+  printf "       per-${dim}[profile]${reset} entries are additive (a profile extends the top-level).\n"
+  printf "       ${yellow}WORKTREE_DEP_DIRS${reset}=\"a b c\"     replace the whole set ${dim}(venv is not relocatable)${reset}\n"
+  printf "       ${yellow}WORKTREE_NO_DEP_BOOTSTRAP=1${reset}   disable\n\n"
   printf "${dim}Run any subcommand with --help for more detail, e.g. worktree add --help${reset}\n"
 }

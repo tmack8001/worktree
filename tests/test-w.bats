@@ -710,6 +710,58 @@ TOML
   [ -z "$(ls -A "$dest")" ]
 }
 
+@test "_w_resolve_dep_dirs: profile dep_dirs extends top-level extends defaults" {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+dep_dirs = "shared_vendor"
+
+[profile.frontend]
+branches = "fe/*"
+dep_dirs = "frontend/node_modules"
+TOML
+  result=$(_w_resolve_dep_dirs "$REPO" "fe/x")
+  [ "$result" = "node_modules vendor shared_vendor frontend/node_modules" ]
+}
+
+@test "_w_resolve_dep_dirs: unmatched branch gets defaults + top-level only" {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+dep_dirs = "shared_vendor"
+
+[profile.frontend]
+branches = "fe/*"
+dep_dirs = "frontend/node_modules"
+
+[profile.default]
+branches = "*"
+TOML
+  result=$(_w_resolve_dep_dirs "$REPO" "random-branch")
+  [ "$result" = "node_modules vendor shared_vendor" ]
+}
+
+@test "_w_resolve_dep_dirs: WORKTREE_DEP_DIRS replaces toml + defaults" {
+  printf 'dep_dirs = "shared_vendor"\n' > "$REPO/.worktree.toml"
+  run env WORKTREE_DEP_DIRS="only_this" bash -c "source '$REPO_ROOT/w.sh'; _w_resolve_dep_dirs '$REPO' main"
+  [ "$output" = "only_this" ]
+}
+
+@test "w add: clones the additive toml + profile dep dirs into the worktree" {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+dep_dirs = "shared_vendor"
+
+[profile.default]
+branches = "*"
+dep_dirs = "extra_pkgs"
+TOML
+  mkdir -p "$REPO/node_modules" "$REPO/shared_vendor" "$REPO/extra_pkgs"
+  echo x > "$REPO/node_modules/m"
+  echo x > "$REPO/shared_vendor/m"
+  echo x > "$REPO/extra_pkgs/m"
+  cd "$REPO"
+  worktree add toml-e2e 2>/dev/null
+  [ -d "$WTS/toml-e2e/node_modules" ]     # built-in
+  [ -d "$WTS/toml-e2e/shared_vendor" ]    # top-level dep_dirs
+  [ -d "$WTS/toml-e2e/extra_pkgs" ]       # profile dep_dirs
+}
+
 @test "_w_load_config: parses session override and window fields" {
   cat > "$TEST_DIR/test.toml" <<'TOML'
 [profile.frontend]

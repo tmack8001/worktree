@@ -172,12 +172,31 @@ The clone uses **copy-on-write** where the filesystem supports it (APFS `clonefi
 
 If the branch changes its dependencies, a follow-up install (e.g. `npm install`) only fetches the delta — a copied `node_modules` is a fast baseline, not a substitute for install.
 
+### Declaring dep dirs per project
+
+The built-in list (`node_modules`, `vendor`) covers common cases, but a project can declare its own in `.worktree.toml` — committed and shared with the team. Declarations are **additive**: a top-level `dep_dirs` extends the built-ins, and a matched `[profile.X]` `dep_dirs` extends that. Nothing replaces, so different branch types can each pull in what they need:
+
+```toml
+# repo-wide, on top of the built-in node_modules + vendor
+dep_dirs = "packages/shared/node_modules"
+
+[profile.frontend]
+branches = "fe/*, ui/*"
+dep_dirs = "apps/web/node_modules"     # added for fe/* and ui/* branches
+
+[profile.backend]
+branches = "be/*, api/*"
+dep_dirs = ".gradle vendor"            # added for be/* and api/* branches
+```
+
+Values are space-separated dir names matched at any depth (like the built-ins). A profile's `dep_dirs` is unioned with the top-level one and the built-ins, then deduplicated.
+
 | Variable | Effect |
 |----------|--------|
-| `WORKTREE_NO_DEP_BOOTSTRAP=1` | Disable the clone entirely |
-| `WORKTREE_DEP_DIRS="a b c"` | Override the dir list (space-separated) |
+| `WORKTREE_NO_DEP_BOOTSTRAP=1` | Disable bootstrapping entirely |
+| `WORKTREE_DEP_DIRS="a b c"` | Imperative override — **replaces** the whole computed set (for "exactly these, nothing else") |
 
-The default list is limited to *relocatable* dep dirs. Python virtualenvs (`.venv`/`venv`) are **excluded by default** because their `activate` scripts and shebangs hardcode the absolute path and don't survive a move — add them via `WORKTREE_DEP_DIRS` only if you know yours tolerates relocation.
+The built-in list is limited to *relocatable* dep dirs. Python virtualenvs (`.venv`/`venv`) are **excluded by default** because their `activate` scripts and shebangs hardcode the absolute path and don't survive a move — add them via a `dep_dirs` key or `WORKTREE_DEP_DIRS` only if you know yours tolerates relocation.
 
 ## Progress indicators
 
