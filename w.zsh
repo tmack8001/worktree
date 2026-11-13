@@ -10,6 +10,7 @@
 #   worktree <tree-url>             resolve GH branch tree URL, then add/cd
 #   worktree rm  [<branch>]         remove worktree
 #   worktree ls  [--all]            list worktrees
+#   worktree sync                   fast-forward the default-branch worktree to origin
 #   worktree cd  <branch>           cd into existing worktree
 #   worktree dev [<branch>]         launch tmux dev session from .worktree.toml
 #   worktree                        interactive switcher (fzf, current repo)
@@ -509,6 +510,92 @@ _w_dev() {
   tmux attach-session -t "$session_name"
 }
 
+# ── Sync ───────────────────────────────────────────────────────────
+# Fast-forward the default-branch worktree (<worktrees>/<default>) to
+# origin so local work is never based on a stale tree.
+#
+# Exit codes: 0 synced / already current / nothing to sync
+#             1 fetch failed (offline) or bad usage
+#             2 invariant breach (worktree dirty, ahead, or off-branch);
+#               nothing is fast-forwarded and nothing is discarded
+_w_sync() {
+  local repo="$1" wts_dir="$2" arg="${3:-}"
+
+  case "$arg" in
+    ""|--help|-h) ;;
+    *) echo "usage: w sync" >&2; return 1 ;;
+  esac
+  if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    cat <<'HELP'
+Usage: w sync
+
+Fetch origin and fast-forward the default-branch worktree
+(../<repo>-worktrees/<default>) with `git merge --ff-only`.
+
+  - Never merge-commits, resets, or discards work.
+  - If that worktree is dirty, its changes are stashed ("w sync
+    quarantine") and the fast-forward is skipped (exit 2).
+  - If it is ahead of origin or on another branch, nothing is touched
+    (exit 2).
+  - If it does not exist, only the fetch runs.
+HELP
+    return 0
+  fi
+
+  local def
+  def=$(_w_base_branch "$repo")
+  if [ -z "$def" ] || [ "$def" = "HEAD" ]; then
+    echo "  ❌ Cannot resolve the default branch (set base_branch in .worktree.toml)" >&2
+    return 1
+  fi
+
+  echo "📡 Fetching origin..."
+  if ! git -C "$repo" fetch --prune origin >/dev/null 2>&1; then
+    echo "  ❌ Fetch failed (offline?)" >&2
+    return 1
+  fi
+
+  local dest="$wts_dir/$def"
+  if [ ! -d "$dest" ] || ! git -C "$dest" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  ⏭  No '$def' worktree at $dest — fetched only"
+    return 0
+  fi
+
+  local cur
+  cur=$(git -C "$dest" symbolic-ref --short -q HEAD)
+  if [ "$cur" != "$def" ]; then
+    echo "  ❌ $dest is on '${cur:-detached HEAD}', expected '$def' — not touched" >&2
+    return 2
+  fi
+
+  if [ -n "$(git -C "$dest" status --porcelain)" ]; then
+    local stamp
+    stamp=$(date +%Y%m%d-%H%M%S)
+    if git -C "$dest" stash push -u -m "w sync quarantine $stamp" >/dev/null 2>&1; then
+      echo "  ❌ $dest was dirty — quarantined to stash 'w sync quarantine $stamp'" >&2
+      echo "     Recover: w add <branch>, then git stash pop there" >&2
+    else
+      echo "  ❌ $dest is dirty and could not be stashed — left as is" >&2
+    fi
+    return 2
+  fi
+
+  local ahead
+  ahead=$(git -C "$dest" rev-list --count "origin/$def..HEAD" 2>/dev/null)
+  if [ "${ahead:-1}" != "0" ]; then
+    echo "  ❌ $dest has commits not on origin/$def — not fast-forwarded" >&2
+    echo "     Move them with: w add <branch> (git branch <branch> $def)" >&2
+    return 2
+  fi
+
+  if git -C "$dest" merge --ff-only "origin/$def" >/dev/null 2>&1; then
+    echo "  ✅ $def is at $(git -C "$dest" rev-parse --short HEAD)"
+  else
+    echo "  ❌ Fast-forward of $def failed" >&2
+    return 2
+  fi
+}
+
 # ── Core commands ──────────────────────────────────────────────────
 
 worktree() {
@@ -536,6 +623,7 @@ worktree() {
     ls)       _w_ls "$W_MAIN_REPO" "${2:-}" ;;
     cd)       _w_cd "$W_WORKTREES_DIR" "${2:-}" ;;
     dev)      _w_dev_cmd "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
+    sync)     _w_sync "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     "")       _w_fzf "$W_MAIN_REPO" "$W_WORKTREES_DIR" ;;
     *)        _w_go "$W_MAIN_REPO" "$W_WORKTREES_DIR" "$1" ;;
   esac
@@ -1170,6 +1258,7 @@ _w_help() {
   printf "       ${cyan}worktree${reset} ${yellow}<tree-url>${reset}         resolve a GitHub branch tree URL, then add/cd\n"
   printf "       ${cyan}worktree${reset} ${yellow}rm${reset}  [<branch>]     remove a worktree ${dim}(prompts to delete branch)${reset}\n"
   printf "       ${cyan}worktree${reset} ${yellow}ls${reset} [--all]         list worktrees ${dim}(--all for all repos)${reset}\n"
+  printf "       ${cyan}worktree${reset} ${yellow}sync${reset}               fetch + fast-forward the default-branch worktree\n"
   printf "       ${cyan}worktree${reset} ${yellow}cd${reset}  <branch>       cd into an existing worktree\n"
   printf "       ${cyan}worktree${reset} ${yellow}dev${reset} [<branch>]     launch tmux dev session from .worktree.toml\n"
   printf "       ${cyan}worktree${reset} ${yellow}help${reset}               show this help\n\n"
