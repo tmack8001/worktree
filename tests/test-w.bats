@@ -797,3 +797,82 @@ TOML
   [ "$win1_dir" = "src/tsx" ]
   [ "$win2" = "fe" ]
 }
+
+# ── w sync ─────────────────────────────────────────────────────────
+
+# Free `main` in $REPO, give it its own worktree, then push a new commit
+# to the throwaway remote from a second clone so the worktree is one behind.
+_sync_fixture() {
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
+  git clone "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
+  echo "moved" > "$TEST_DIR/pusher/moved.txt"
+  git -C "$TEST_DIR/pusher" add moved.txt
+  git -C "$TEST_DIR/pusher" commit -qm "remote moved"
+  git -C "$TEST_DIR/pusher" push -q
+}
+
+@test "w sync: fast-forwards a clean main worktree" {
+  _sync_fixture
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/main/moved.txt" ]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+}
+
+@test "w sync: already current is a no-op success" {
+  _sync_fixture
+  _w_sync "$REPO" "$WTS" >/dev/null
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+}
+
+@test "w sync: dirty main is quarantined to a stash and not fast-forwarded" {
+  _sync_fixture
+  echo "scribble" >> "$WTS/main/README.md"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+  [ -z "$(git -C "$WTS/main" status --porcelain)" ]
+  git -C "$WTS/main" stash list | grep -q "w sync quarantine"
+}
+
+@test "w sync: main ahead of origin is refused and keeps its commits" {
+  _sync_fixture
+  echo "local" > "$WTS/main/local.txt"
+  git -C "$WTS/main" add local.txt
+  git -C "$WTS/main" commit -qm "stray local commit"
+  before=$(git -C "$WTS/main" rev-parse HEAD)
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$before" ]
+}
+
+@test "w sync: main worktree on another branch is not touched" {
+  _sync_fixture
+  git -C "$WTS/main" checkout -b other -q
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: no default-branch worktree only fetches" {
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fetched only"* ]]
+}
+
+@test "w sync: fetch failure exits 1" {
+  _sync_fixture
+  git -C "$REPO" remote set-url origin "$TEST_DIR/does-not-exist.git"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 1 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: dispatches via worktree and rejects extra args" {
+  cd "$REPO"
+  run worktree sync bogus
+  [ "$status" -eq 1 ]
+}

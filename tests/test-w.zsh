@@ -1266,6 +1266,71 @@ TOML
   )
 }
 
+# Free `main` in the clone, give it a worktree, and move the remote ahead
+# from a second clone. Echoes the repo dir; sets nothing global.
+_sync_fixture() {
+  local name="$1"
+  local repo wts pusher
+  repo=$(setup_repo "$name")
+  wts="$TEST_ROOT/${name}-worktrees"
+  pusher="$TEST_ROOT/${name}-pusher"
+  git -C "$repo" checkout --detach -q >/dev/null 2>&1
+  mkdir -p "$wts"
+  git -C "$repo" worktree add "$wts/main" main -q >/dev/null 2>&1
+  git clone "$TEST_ROOT/${name}-bare.git" "$pusher" -q >/dev/null 2>&1
+  echo moved > "$pusher/moved.txt"
+  git -C "$pusher" add moved.txt
+  git -C "$pusher" commit -qm "remote moved" >/dev/null 2>&1
+  git -C "$pusher" push -q >/dev/null 2>&1
+  echo "$repo"
+}
+
+test_sync() {
+  echo "── w sync ──"
+  local repo wts rc
+
+  repo=$(_sync_fixture "sync-ff"); wts="$TEST_ROOT/sync-ff-worktrees"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "clean main: exit 0" 0 "$rc"
+  [[ -f "$wts/main/moved.txt" ]] && pass "clean main fast-forwarded" || fail "clean main not fast-forwarded"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "already current: exit 0" 0 "$rc"
+
+  repo=$(_sync_fixture "sync-dirty"); wts="$TEST_ROOT/sync-dirty-worktrees"
+  echo scribble >> "$wts/main/README.md"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "dirty main: exit 2" 2 "$rc"
+  [[ ! -f "$wts/main/moved.txt" ]] && pass "dirty main not fast-forwarded" || fail "dirty main was fast-forwarded"
+  assert_contains "dirty main stashed" "$(git -C "$wts/main" stash list)" "w sync quarantine"
+
+  repo=$(_sync_fixture "sync-ahead"); wts="$TEST_ROOT/sync-ahead-worktrees"
+  echo local > "$wts/main/local.txt"
+  git -C "$wts/main" add local.txt
+  git -C "$wts/main" commit -qm "stray" >/dev/null 2>&1
+  local before; before=$(git -C "$wts/main" rev-parse HEAD)
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "ahead main: exit 2" 2 "$rc"
+  assert_eq "ahead main keeps its commits" "$before" "$(git -C "$wts/main" rev-parse HEAD)"
+
+  repo=$(_sync_fixture "sync-branch"); wts="$TEST_ROOT/sync-branch-worktrees"
+  git -C "$wts/main" checkout -b other -q >/dev/null 2>&1
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "main worktree on other branch: exit 2" 2 "$rc"
+
+  repo=$(setup_repo "sync-none")
+  local out; out=$(_w_sync "$repo" "$TEST_ROOT/sync-none-worktrees" 2>&1); rc=$?
+  assert_exit_code "no main worktree: exit 0" 0 "$rc"
+  assert_contains "no main worktree: fetch only" "$out" "fetched only"
+
+  repo=$(_sync_fixture "sync-offline"); wts="$TEST_ROOT/sync-offline-worktrees"
+  git -C "$repo" remote set-url origin "$TEST_ROOT/nowhere.git"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "fetch failure: exit 1" 1 "$rc"
+
+  (cd "$repo" && worktree sync bogus >/dev/null 2>&1); rc=$?
+  assert_exit_code "extra arg rejected via dispatcher" 1 "$rc"
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -1319,6 +1384,7 @@ test_add_help_pr_url
 test_help_pr_url_entry
 test_bootstrap_deps
 test_dep_dirs_toml
+test_sync
 
 # ── Summary ────────────────────────────────────────────────────────
 
