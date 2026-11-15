@@ -84,6 +84,18 @@ assert_exit_code() {
 # ── Test environment setup ─────────────────────────────────────────
 
 TEST_ROOT=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/w-test.XXXXXX")" && pwd -P)
+
+# A PATH with every tool except gh and tmux, so "not installed" tests hold
+# even on machines where those live in /usr/bin.
+NOTOOLS_BIN="$TEST_ROOT/notools-bin"
+mkdir -p "$NOTOOLS_BIN"
+for _d in /usr/bin /bin; do
+  for _f in "$_d"/*(N); do
+    _n="${_f:t}"
+    [[ "$_n" == (gh|tmux) ]] && continue
+    [[ -e "$NOTOOLS_BIN/$_n" ]] || ln -s "$_f" "$NOTOOLS_BIN/$_n" 2>/dev/null
+  done
+done
 SCRIPT_DIR="${0:A:h}"
 
 # Source w.zsh from repo root (one level up from tests/)
@@ -646,7 +658,7 @@ test_not_in_repo() {
 
     # Bare w should not error about "not in a git repository"
     # Hide fzf so _w_fzf_all returns quickly with "fzf not installed"
-    output=$(PATH="/usr/bin:/bin" w 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w 2>&1)
     if [[ "$output" != *"Not in a git repository"* ]]; then
       pass "bare w outside repo falls back to --all"
     else
@@ -654,7 +666,7 @@ test_not_in_repo() {
     fi
 
     # w ls outside repo should print, not require fzf
-    output=$(PATH="/usr/bin:/bin" w ls 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w ls 2>&1)
     if [[ "$output" != *"Not in a git repository"* && "$output" != *"fzf not installed"* ]]; then
       pass "w ls outside repo prints worktrees without fzf"
     else
@@ -699,7 +711,7 @@ TOML
 
     # Temporarily hide tmux from PATH
     local output
-    output=$(PATH="/usr/bin:/bin" w dev 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w dev 2>&1)
     if [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]; then
       # Either tmux isn't available (expected) or it is (also fine)
       pass "dev handles tmux availability correctly"
@@ -977,21 +989,21 @@ test_resolve_pr_url() {
   # Valid PR URL patterns — without gh available all should fail with the gh error,
   # not with "not a PR URL" (i.e. pattern matching must succeed).
   local output
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
   assert_contains "https pull url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   assert_contains "https pulls url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
   assert_contains "trailing slash url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
   assert_contains "http pull url reaches gh check" "$output" "gh CLI not installed"
 
   # /pulls/ must be normalised to /pull/ before gh is called —
   # the gh error message (or "Failed to resolve") must not contain /pulls/
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   if [[ "$output" != *"/pulls/"* ]]; then
     pass "/pulls/ normalised to /pull/ before gh call"
   else
@@ -1084,7 +1096,7 @@ test_add_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w add "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w add "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w add pr-url without gh errors" "$output" "gh CLI not installed"
   )
 }
@@ -1097,7 +1109,7 @@ test_shortcut_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w pr-url shortcut without gh errors" "$output" "gh CLI not installed"
   )
 }
@@ -1266,6 +1278,148 @@ TOML
   )
 }
 
+# Free `main` in the clone, give it a worktree, and (unless "unmoved") move
+# the remote ahead from a second clone. Echoes the repo dir. Independent of
+# init.defaultBranch; prints nothing extra, and echoes "FIXTURE-BROKEN" paths
+# via a non-moving remote so tests fail loudly.
+_sync_fixture() {
+  local name="$1" mode="${2:-moved}"
+  local repo wts pusher bare before after
+  repo=$(setup_repo "$name")
+  wts="$TEST_ROOT/${name}-worktrees"
+  pusher="$TEST_ROOT/${name}-pusher"
+  bare="$TEST_ROOT/${name}-bare.git"
+  git -C "$repo" checkout --detach -q >/dev/null 2>&1
+  mkdir -p "$wts"
+  git -C "$repo" worktree add "$wts/main" main -q >/dev/null 2>&1
+  if [[ "$mode" == "moved" ]]; then
+    before=$(git -C "$bare" rev-parse refs/heads/main)
+    git clone -b main "$bare" "$pusher" -q >/dev/null 2>&1
+    echo moved > "$pusher/moved.txt"
+    git -C "$pusher" add moved.txt
+    git -C "$pusher" commit -qm "remote moved" >/dev/null 2>&1
+    git -C "$pusher" push -q origin main >/dev/null 2>&1
+    after=$(git -C "$bare" rev-parse refs/heads/main)
+    if [[ "$before" == "$after" || "$after" != "$(git -C "$pusher" rev-parse HEAD)" ]]; then
+      echo "FIXTURE-BROKEN: remote main did not move" >&2
+      echo "$TEST_ROOT/fixture-broken"
+      return 0
+    fi
+  fi
+  echo "$repo"
+}
+
+test_sync() {
+  echo "── w sync ──"
+  local repo wts rc out before
+
+  repo=$(_sync_fixture "sync-ff"); wts="$TEST_ROOT/sync-ff-worktrees"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "clean main: exit 0" 0 "$rc"
+  [[ -f "$wts/main/moved.txt" ]] && pass "clean main fast-forwarded" || fail "clean main not fast-forwarded"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "already current: exit 0" 0 "$rc"
+
+  repo=$(_sync_fixture "sync-dirty"); wts="$TEST_ROOT/sync-dirty-worktrees"
+  echo scribble >> "$wts/main/README.md"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "dirty main: exit 2" 2 "$rc"
+  [[ ! -f "$wts/main/moved.txt" ]] && pass "dirty main not fast-forwarded" || fail "dirty main was fast-forwarded"
+  assert_contains "dirty main stashed" "$(git -C "$wts/main" stash list)" "w sync quarantine"
+
+  repo=$(_sync_fixture "sync-untracked"); wts="$TEST_ROOT/sync-untracked-worktrees"
+  echo scratch > "$wts/main/untracked.txt"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "untracked-only main: exit 2" 2 "$rc"
+  [[ ! -f "$wts/main/moved.txt" ]] && pass "untracked-only main not fast-forwarded" || fail "untracked-only main was fast-forwarded"
+  [[ ! -e "$wts/main/untracked.txt" ]] && pass "untracked file quarantined" || fail "untracked file still present"
+  assert_eq "untracked-only main clean after" "" "$(git -C "$wts/main" status --porcelain)"
+  assert_contains "untracked-only main stashed" "$(git -C "$wts/main" stash list)" "w sync quarantine"
+
+  repo=$(_sync_fixture "sync-dirty-current" unmoved); wts="$TEST_ROOT/sync-dirty-current-worktrees"
+  echo scribble >> "$wts/main/README.md"
+  echo scratch > "$wts/main/untracked.txt"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "dirty + current: exit 0" 0 "$rc"
+  [[ -f "$wts/main/untracked.txt" ]] && pass "dirty + current: untracked kept" || fail "dirty + current: untracked removed"
+  grep -q scribble "$wts/main/README.md" && pass "dirty + current: edit kept" || fail "dirty + current: edit lost"
+  assert_eq "dirty + current: no stash" "" "$(git -C "$wts/main" stash list)"
+
+  repo=$(_sync_fixture "sync-ahead" unmoved); wts="$TEST_ROOT/sync-ahead-worktrees"
+  echo local > "$wts/main/local.txt"
+  git -C "$wts/main" add local.txt
+  git -C "$wts/main" commit -qm "stray" >/dev/null 2>&1
+  before=$(git -C "$wts/main" rev-parse HEAD)
+  out=$(_w_sync "$repo" "$wts" 2>&1); rc=$?
+  assert_exit_code "purely ahead main: exit 2" 2 "$rc"
+  assert_contains "purely ahead main mentions origin/main" "$out" "origin/main"
+  assert_eq "purely ahead main keeps its commits" "$before" "$(git -C "$wts/main" rev-parse HEAD)"
+
+  repo=$(_sync_fixture "sync-diverged"); wts="$TEST_ROOT/sync-diverged-worktrees"
+  echo local > "$wts/main/local.txt"
+  git -C "$wts/main" add local.txt
+  git -C "$wts/main" commit -qm "stray" >/dev/null 2>&1
+  before=$(git -C "$wts/main" rev-parse HEAD)
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "diverged main: exit 2" 2 "$rc"
+  assert_eq "diverged main untouched" "$before" "$(git -C "$wts/main" rev-parse HEAD)"
+  [[ ! -f "$wts/main/moved.txt" ]] && pass "diverged main not merged" || fail "diverged main was merged"
+
+  # Ignored file that the fast-forward would overwrite must survive.
+  repo=$(_sync_fixture "sync-ignored" unmoved); wts="$TEST_ROOT/sync-ignored-worktrees"
+  echo moved.txt > "$repo/.git/info/exclude"
+  echo precious > "$wts/main/moved.txt"
+  git clone -b main "$TEST_ROOT/sync-ignored-bare.git" "$TEST_ROOT/sync-ignored-pusher" -q >/dev/null 2>&1
+  echo moved > "$TEST_ROOT/sync-ignored-pusher/moved.txt"
+  git -C "$TEST_ROOT/sync-ignored-pusher" add moved.txt
+  git -C "$TEST_ROOT/sync-ignored-pusher" commit -qm "remote moved" >/dev/null 2>&1
+  git -C "$TEST_ROOT/sync-ignored-pusher" push -q origin main >/dev/null 2>&1
+  assert_eq "ignored fixture: remote moved" \
+    "$(git -C "$TEST_ROOT/sync-ignored-pusher" rev-parse HEAD)" \
+    "$(git -C "$TEST_ROOT/sync-ignored-bare.git" rev-parse refs/heads/main)"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "ignored file in the way: exit 2" 2 "$rc"
+  assert_eq "ignored file preserved" "precious" "$(cat "$wts/main/moved.txt")"
+
+  repo=$(_sync_fixture "sync-branch"); wts="$TEST_ROOT/sync-branch-worktrees"
+  git -C "$wts/main" checkout -b other -q >/dev/null 2>&1
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "main worktree on other branch: exit 2" 2 "$rc"
+  [[ ! -f "$wts/main/moved.txt" ]] && pass "other-branch worktree untouched" || fail "other-branch worktree was modified"
+
+  repo=$(setup_repo "sync-none")
+  git -C "$repo" checkout --detach -q >/dev/null 2>&1
+  out=$(_w_sync "$repo" "$TEST_ROOT/sync-none-worktrees" 2>&1); rc=$?
+  assert_exit_code "no main worktree: exit 0" 0 "$rc"
+  assert_contains "no main worktree: fetch only" "$out" "fetched only"
+
+  repo=$(_sync_fixture "sync-nobranch" unmoved); wts="$TEST_ROOT/sync-nobranch-worktrees"
+  git -C "$TEST_ROOT/sync-nobranch-bare.git" branch -m main trunk >/dev/null 2>&1
+  git -C "$TEST_ROOT/sync-nobranch-bare.git" symbolic-ref HEAD refs/heads/trunk >/dev/null 2>&1
+  out=$(_w_sync "$repo" "$wts" 2>&1); rc=$?
+  assert_exit_code "missing origin/<default>: exit 2" 2 "$rc"
+  assert_contains "missing origin/<default> message" "$out" "does not exist after fetch"
+
+  repo=$(_sync_fixture "sync-offline"); wts="$TEST_ROOT/sync-offline-worktrees"
+  git -C "$repo" remote set-url origin "$TEST_ROOT/nowhere.git"
+  _w_sync "$repo" "$wts" >/dev/null 2>&1; rc=$?
+  assert_exit_code "fetch failure: exit 1" 1 "$rc"
+
+  repo=$(setup_repo "sync-disp")
+  git -C "$repo" checkout --detach -q >/dev/null 2>&1
+  out=$(cd "$repo" && worktree sync 2>&1); rc=$?
+  assert_exit_code "dispatcher: sync from main repo exit 0" 0 "$rc"
+  assert_contains "dispatcher reaches _w_sync" "$out" "fetched only"
+  out=$(cd "$repo" && worktree sync -h 2>&1); rc=$?
+  assert_exit_code "dispatcher: sync -h exit 0" 0 "$rc"
+  assert_contains "dispatcher: sync -h usage" "$out" "Usage: w sync"
+  out=$(cd "$TEST_ROOT" && worktree sync 2>&1); rc=$?
+  assert_exit_code "dispatcher: outside repo exit 1" 1 "$rc"
+  assert_contains "dispatcher: outside repo message" "$out" "Not in a git repository"
+  (cd "$repo" && worktree sync bogus >/dev/null 2>&1); rc=$?
+  assert_exit_code "extra arg rejected via dispatcher" 1 "$rc"
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -1319,6 +1473,7 @@ test_add_help_pr_url
 test_help_pr_url_entry
 test_bootstrap_deps
 test_dep_dirs_toml
+test_sync
 
 # ── Summary ────────────────────────────────────────────────────────
 

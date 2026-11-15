@@ -6,6 +6,19 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+
+  # A PATH with every tool except gh and tmux, so "not installed" tests hold
+  # even on machines where those live in /usr/bin.
+  NOTOOLS_BIN="$BATS_FILE_TMPDIR/notools-bin"
+  mkdir -p "$NOTOOLS_BIN"
+  for d in /usr/bin /bin; do
+    for f in "$d"/*; do
+      n="${f##*/}"
+      case "$n" in gh|tmux) continue ;; esac
+      [ -e "$NOTOOLS_BIN/$n" ] || ln -s "$f" "$NOTOOLS_BIN/$n" 2>/dev/null
+    done
+  done
+  export NOTOOLS_BIN
 }
 
 setup() {
@@ -18,7 +31,7 @@ setup() {
   TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
   export TEST_DIR
 
-  git init --bare "$TEST_DIR/remote.git" -q
+  git init --bare -b main "$TEST_DIR/remote.git" -q
   git clone       "$TEST_DIR/remote.git" "$TEST_DIR/repo" -q
   git -C "$TEST_DIR/repo" checkout -b main -q
   echo "init"   > "$TEST_DIR/repo/README.md"
@@ -246,8 +259,8 @@ run = "echo hi"
 TOML
   cd "$REPO"
   worktree add tmux-test 2>/dev/null
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH=/usr/bin:/bin worktree dev 2>&1"
-  [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$NOTOOLS_BIN' worktree dev 2>&1"
+  [[ "$output" == *"tmux not installed"* ]]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -260,7 +273,7 @@ TOML
 }
 
 @test "w (bare): falls back gracefully outside a git repo" {
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH=/usr/bin:/bin worktree 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$NOTOOLS_BIN' worktree 2>&1"
   [[ "$output" != *"Not in a git repository"* ]]
 }
 
@@ -278,10 +291,14 @@ TOML
 
 @test "w help: shows usage" {
   run worktree help
-  [[ "$output" == *"git worktree helper"* ]]
-  [[ "$output" == *"worktree dev"* ]]
-  [[ "$output" == *"worktree clone"* ]]
-  [[ "$output" == *"w, wt"* ]]
+  # strip ANSI escapes so the checks see plain text
+  local plain
+  plain=$(printf '%s' "$output" | sed $'s/\x1b\\[[0-9;]*m//g')
+  [[ "$plain" == *"git worktree helper"* ]]
+  [[ "$plain" == *"worktree dev"* ]]
+  [[ "$plain" == *"worktree clone"* ]]
+  [[ "$plain" == *"worktree sync"* ]]
+  [[ "$plain" == *"worktree (aliases: w, wt)"* || "$plain" == *"aliases: w, wt"* ]]
 }
 
 @test "w add --help: shows subcommand help" {
@@ -351,27 +368,27 @@ TOML
 }
 
 @test "_w_resolve_pr_url: errors when gh not installed" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: normalizes /pulls/ to /pull/ in error message" {
   # gh is not available so we can only confirm the URL is normalised
   # before gh is called (visible in the error output)
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
   # Returns non-zero (gh not found), but must NOT output /pulls/ in any
   # gh-related message — the URL was already normalised before that call
   [[ "$output" != *"/pulls/"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts http:// PR URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
   # gh not installed, but we get the gh error (not "not a PR URL")
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts trailing-slash URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
@@ -433,13 +450,13 @@ TOML
 
 @test "w add: PR URL without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree add 'https://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH='$NOTOOLS_BIN' worktree add 'https://github.com/org/repo/pull/1' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "w <pr-url>: PR URL shortcut without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree 'https://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH='$NOTOOLS_BIN' worktree 'https://github.com/org/repo/pull/1' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
@@ -796,4 +813,181 @@ TOML
   [ "$win1" = "proxy" ]
   [ "$win1_dir" = "src/tsx" ]
   [ "$win2" = "fe" ]
+}
+
+# ── w sync ─────────────────────────────────────────────────────────
+
+# Free `main` in $REPO, give it its own worktree, then push a new commit
+# to the throwaway remote from a second clone so the worktree is one behind.
+# Independent of init.defaultBranch; fails loudly if the remote did not move.
+_sync_fixture() {
+  local before after
+  before=$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
+  git clone -b main "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
+  echo "moved" > "$TEST_DIR/pusher/moved.txt"
+  git -C "$TEST_DIR/pusher" add moved.txt
+  git -C "$TEST_DIR/pusher" commit -qm "remote moved"
+  git -C "$TEST_DIR/pusher" push -q origin main
+  after=$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)
+  [ "$before" != "$after" ]
+  [ "$after" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+}
+
+# Same as the fixture, but the remote is NOT moved: main worktree is current.
+_sync_fixture_unmoved() {
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
+}
+
+@test "w sync: fast-forwards a clean main worktree" {
+  _sync_fixture
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/main/moved.txt" ]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+}
+
+@test "w sync: already current is a no-op success" {
+  _sync_fixture
+  _w_sync "$REPO" "$WTS" >/dev/null
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+}
+
+@test "w sync: dirty main is quarantined to a stash and not fast-forwarded" {
+  _sync_fixture
+  echo "scribble" >> "$WTS/main/README.md"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+  [ -z "$(git -C "$WTS/main" status --porcelain)" ]
+  git -C "$WTS/main" stash list | grep -q "w sync quarantine"
+}
+
+@test "w sync: untracked-only dirty main is quarantined to a stash" {
+  _sync_fixture
+  echo "scratch" > "$WTS/main/untracked.txt"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+  [ ! -e "$WTS/main/untracked.txt" ]
+  [ -z "$(git -C "$WTS/main" status --porcelain)" ]
+  git -C "$WTS/main" stash list | grep -q "w sync quarantine"
+}
+
+@test "w sync: dirty but already current is left untouched, no stash" {
+  _sync_fixture_unmoved
+  echo "scribble" >> "$WTS/main/README.md"
+  echo "scratch" > "$WTS/main/untracked.txt"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/main/untracked.txt" ]
+  grep -q scribble "$WTS/main/README.md"
+  [ -z "$(git -C "$WTS/main" stash list)" ]
+}
+
+@test "w sync: main purely ahead of origin is refused and untouched" {
+  _sync_fixture_unmoved
+  echo "local" > "$WTS/main/local.txt"
+  git -C "$WTS/main" add local.txt
+  git -C "$WTS/main" commit -qm "stray local commit"
+  before=$(git -C "$WTS/main" rev-parse HEAD)
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"origin/main"* ]]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$before" ]
+  [ -f "$WTS/main/local.txt" ]
+}
+
+@test "w sync: main diverged from origin is refused and untouched" {
+  _sync_fixture
+  echo "local" > "$WTS/main/local.txt"
+  git -C "$WTS/main" add local.txt
+  git -C "$WTS/main" commit -qm "stray local commit"
+  before=$(git -C "$WTS/main" rev-parse HEAD)
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$before" ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: ignored file that would be overwritten is preserved" {
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
+  echo "moved.txt" > "$REPO/.git/info/exclude"
+  echo "precious" > "$WTS/main/moved.txt"
+  git clone -b main "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
+  echo "moved" > "$TEST_DIR/pusher/moved.txt"
+  git -C "$TEST_DIR/pusher" add moved.txt
+  git -C "$TEST_DIR/pusher" commit -qm "remote moved"
+  git -C "$TEST_DIR/pusher" push -q origin main
+  [ "$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ "$(cat "$WTS/main/moved.txt")" = "precious" ]
+}
+
+@test "w sync: main worktree on another branch is not touched" {
+  _sync_fixture
+  git -C "$WTS/main" checkout -b other -q
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: no default-branch worktree only fetches" {
+  git -C "$REPO" checkout --detach -q
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fetched only"* ]]
+}
+
+@test "w sync: missing origin/<default> after fetch exits 2" {
+  _sync_fixture_unmoved
+  git -C "$TEST_DIR/remote.git" branch -m main trunk
+  git -C "$TEST_DIR/remote.git" symbolic-ref HEAD refs/heads/trunk
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"does not exist after fetch"* ]]
+}
+
+@test "w sync: fetch failure exits 1" {
+  _sync_fixture
+  git -C "$REPO" remote set-url origin "$TEST_DIR/does-not-exist.git"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 1 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: dispatcher reaches _w_sync from the main repo" {
+  git -C "$REPO" checkout --detach -q
+  cd "$REPO"
+  run worktree sync
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fetched only"* ]]
+}
+
+@test "w sync: dispatcher -h prints usage" {
+  cd "$REPO"
+  run worktree sync -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage: w sync"* ]]
+}
+
+@test "w sync: dispatcher outside a repo fails" {
+  cd "$TEST_DIR"
+  run worktree sync
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Not in a git repository"* ]]
+}
+
+@test "w sync: dispatcher rejects extra args" {
+  cd "$REPO"
+  run worktree sync bogus
+  [ "$status" -eq 1 ]
 }
