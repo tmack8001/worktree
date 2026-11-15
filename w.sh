@@ -623,13 +623,13 @@ _w_dev() {
 }
 
 # ── Sync ───────────────────────────────────────────────────────────
-# Fast-forward the default-branch worktree (<worktrees>/<default>) to
+# Fast-forward the default-branch worktree (located via git worktree list) to
 # origin so local work is never based on a stale tree.
 #
 # Exit codes: 0 synced / already current / nothing to sync
 #             1 fetch failed (offline) or bad usage
-#             2 invariant breach (worktree dirty, ahead, or off-branch);
-#               nothing is fast-forwarded and nothing is discarded
+#             2 invariant breach (dirty with fast-forward pending, ahead/diverged,
+#               off-branch, or no origin/<default>); nothing is discarded
 _w_sync() {
   local repo="$1" wts_dir="$2" arg="${3:-}"
 
@@ -641,14 +641,17 @@ _w_sync() {
     cat <<'HELP'
 Usage: w sync
 
-Fetch origin and fast-forward the default-branch worktree
-(../<repo>-worktrees/<default>) with `git merge --ff-only`.
+Fetch origin and fast-forward the default-branch worktree (found via
+`git worktree list`) with `git merge --ff-only`.
 
   - Never merge-commits, resets, or discards work.
-  - If that worktree is dirty, its changes are stashed ("w sync
-    quarantine") and the fast-forward is skipped (exit 2).
-  - If it is ahead of origin or on another branch, nothing is touched
-    (exit 2).
+  - If the worktree is already current, nothing is touched, even if dirty.
+  - Only when a fast-forward is pending and the worktree is dirty, its
+    changes are stashed ("w sync quarantine") and the fast-forward is
+    skipped (exit 2).
+  - If it is ahead of / diverged from origin or on another branch,
+    nothing is touched (exit 2).
+  - Ignored files are never overwritten by the fast-forward.
   - If it does not exist, only the fetch runs.
 HELP
     return 0
@@ -662,14 +665,29 @@ HELP
   fi
 
   echo "📡 Fetching origin..."
-  if ! git -C "$repo" fetch --prune origin >/dev/null 2>&1; then
-    echo "  ❌ Fetch failed (offline?)" >&2
+  local ferr
+  if ! ferr=$(git -C "$repo" fetch --prune origin 2>&1 >/dev/null); then
+    echo "  ❌ Fetch failed:" >&2
+    [ -n "$ferr" ] && printf '%s\n' "$ferr" | sed 's/^/     /' >&2
     return 1
   fi
 
-  local dest="$wts_dir/$def"
-  if [ ! -d "$dest" ] || ! git -C "$dest" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "  ⏭  No '$def' worktree at $dest — fetched only"
+  # Locate the default-branch worktree (main checkout or any linked one)
+  local dest="" line wt_path=""
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) wt_path="${line#worktree }" ;;
+      "branch refs/heads/$def") dest="$wt_path"; break ;;
+    esac
+  done <<EOF_WT
+$(git -C "$repo" worktree list --porcelain 2>/dev/null)
+EOF_WT
+  # Standard location holding another branch: report it instead of skipping
+  if [ -z "$dest" ] && [ -e "$wts_dir/$def/.git" ]; then
+    dest="$wts_dir/$def"
+  fi
+  if [ -z "$dest" ] || [ ! -d "$dest" ]; then
+    echo "  ⏭  No worktree for '$def' — fetched only"
     return 0
   fi
 
@@ -680,27 +698,44 @@ HELP
     return 2
   fi
 
+  if ! git -C "$dest" rev-parse -q --verify "refs/remotes/origin/$def" >/dev/null 2>&1; then
+    echo "  ❌ origin/$def does not exist after fetch" >&2
+    return 2
+  fi
+
+  local ahead behind
+  ahead=$(git -C "$dest" rev-list --count "origin/$def..HEAD" 2>/dev/null)
+  if [ "${ahead:-1}" != "0" ]; then
+    echo "  ❌ $dest has commits not on origin/$def — not fast-forwarded, nothing touched" >&2
+    echo "     Preserve them on a branch, then reset (sync does not do this for you):" >&2
+    echo "       git -C $dest branch <branch> && git -C $dest reset --keep origin/$def" >&2
+    echo "     then: w <branch>   (commits stay safe on <branch>)" >&2
+    return 2
+  fi
+
+  behind=$(git -C "$dest" rev-list --count "HEAD..origin/$def" 2>/dev/null)
+  if [ "${behind:-0}" = "0" ]; then
+    echo "  ✅ $def already current at $(git -C "$dest" rev-parse --short HEAD)"
+    return 0
+  fi
+
+  # A fast-forward is pending; quarantine local changes first
   if [ -n "$(git -C "$dest" status --porcelain)" ]; then
-    local stamp
+    local stamp before after
     stamp=$(date +%Y%m%d-%H%M%S)
-    if git -C "$dest" stash push -u -m "w sync quarantine $stamp" >/dev/null 2>&1; then
-      echo "  ❌ $dest was dirty — quarantined to stash 'w sync quarantine $stamp'" >&2
-      echo "     Recover: w add <branch>, then git stash pop there" >&2
+    before=$(git -C "$dest" rev-parse -q --verify refs/stash 2>/dev/null)
+    git -C "$dest" stash push -u -m "w sync quarantine $stamp" >/dev/null 2>&1
+    after=$(git -C "$dest" rev-parse -q --verify refs/stash 2>/dev/null)
+    if [ -n "$after" ] && [ "$after" != "$before" ]; then
+      echo "  ❌ $dest was dirty — quarantined to stash 'w sync quarantine $stamp' ($after)" >&2
+      echo "     Not fast-forwarded. Recover: w add <branch>, then in it: git stash apply $after" >&2
     else
-      echo "  ❌ $dest is dirty and could not be stashed — left as is" >&2
+      echo "  ❌ $dest is dirty and could not be stashed — left as is, not fast-forwarded" >&2
     fi
     return 2
   fi
 
-  local ahead
-  ahead=$(git -C "$dest" rev-list --count "origin/$def..HEAD" 2>/dev/null)
-  if [ "${ahead:-1}" != "0" ]; then
-    echo "  ❌ $dest has commits not on origin/$def — not fast-forwarded" >&2
-    echo "     Move them with: w add <branch> (git branch <branch> $def)" >&2
-    return 2
-  fi
-
-  if git -C "$dest" merge --ff-only "origin/$def" >/dev/null 2>&1; then
+  if git -C "$dest" merge --ff-only --no-overwrite-ignore "origin/$def" >/dev/null 2>&1; then
     echo "  ✅ $def is at $(git -C "$dest" rev-parse --short HEAD)"
   else
     echo "  ❌ Fast-forward of $def failed" >&2

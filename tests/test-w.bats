@@ -802,15 +802,28 @@ TOML
 
 # Free `main` in $REPO, give it its own worktree, then push a new commit
 # to the throwaway remote from a second clone so the worktree is one behind.
+# Independent of init.defaultBranch; fails loudly if the remote did not move.
 _sync_fixture() {
+  local before after
+  before=$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)
   git -C "$REPO" checkout --detach -q
   mkdir -p "$WTS"
   git -C "$REPO" worktree add "$WTS/main" main -q
-  git clone "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
+  git clone -b main "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
   echo "moved" > "$TEST_DIR/pusher/moved.txt"
   git -C "$TEST_DIR/pusher" add moved.txt
   git -C "$TEST_DIR/pusher" commit -qm "remote moved"
-  git -C "$TEST_DIR/pusher" push -q
+  git -C "$TEST_DIR/pusher" push -q origin main
+  after=$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)
+  [ "$before" != "$after" ]
+  [ "$after" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+}
+
+# Same as the fixture, but the remote is NOT moved: main worktree is current.
+_sync_fixture_unmoved() {
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
 }
 
 @test "w sync: fast-forwards a clean main worktree" {
@@ -838,7 +851,42 @@ _sync_fixture() {
   git -C "$WTS/main" stash list | grep -q "w sync quarantine"
 }
 
-@test "w sync: main ahead of origin is refused and keeps its commits" {
+@test "w sync: untracked-only dirty main is quarantined to a stash" {
+  _sync_fixture
+  echo "scratch" > "$WTS/main/untracked.txt"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ ! -f "$WTS/main/moved.txt" ]
+  [ ! -e "$WTS/main/untracked.txt" ]
+  [ -z "$(git -C "$WTS/main" status --porcelain)" ]
+  git -C "$WTS/main" stash list | grep -q "w sync quarantine"
+}
+
+@test "w sync: dirty but already current is left untouched, no stash" {
+  _sync_fixture_unmoved
+  echo "scribble" >> "$WTS/main/README.md"
+  echo "scratch" > "$WTS/main/untracked.txt"
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/main/untracked.txt" ]
+  grep -q scribble "$WTS/main/README.md"
+  [ -z "$(git -C "$WTS/main" stash list)" ]
+}
+
+@test "w sync: main purely ahead of origin is refused and untouched" {
+  _sync_fixture_unmoved
+  echo "local" > "$WTS/main/local.txt"
+  git -C "$WTS/main" add local.txt
+  git -C "$WTS/main" commit -qm "stray local commit"
+  before=$(git -C "$WTS/main" rev-parse HEAD)
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"origin/main"* ]]
+  [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$before" ]
+  [ -f "$WTS/main/local.txt" ]
+}
+
+@test "w sync: main diverged from origin is refused and untouched" {
   _sync_fixture
   echo "local" > "$WTS/main/local.txt"
   git -C "$WTS/main" add local.txt
@@ -847,6 +895,24 @@ _sync_fixture() {
   run _w_sync "$REPO" "$WTS"
   [ "$status" -eq 2 ]
   [ "$(git -C "$WTS/main" rev-parse HEAD)" = "$before" ]
+  [ ! -f "$WTS/main/moved.txt" ]
+}
+
+@test "w sync: ignored file that would be overwritten is preserved" {
+  git -C "$REPO" checkout --detach -q
+  mkdir -p "$WTS"
+  git -C "$REPO" worktree add "$WTS/main" main -q
+  echo "moved.txt" > "$REPO/.git/info/exclude"
+  echo "precious" > "$WTS/main/moved.txt"
+  git clone -b main "$TEST_DIR/remote.git" "$TEST_DIR/pusher" -q
+  echo "moved" > "$TEST_DIR/pusher/moved.txt"
+  git -C "$TEST_DIR/pusher" add moved.txt
+  git -C "$TEST_DIR/pusher" commit -qm "remote moved"
+  git -C "$TEST_DIR/pusher" push -q origin main
+  [ "$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)" = "$(git -C "$TEST_DIR/pusher" rev-parse HEAD)" ]
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [ "$(cat "$WTS/main/moved.txt")" = "precious" ]
 }
 
 @test "w sync: main worktree on another branch is not touched" {
@@ -858,9 +924,19 @@ _sync_fixture() {
 }
 
 @test "w sync: no default-branch worktree only fetches" {
+  git -C "$REPO" checkout --detach -q
   run _w_sync "$REPO" "$WTS"
   [ "$status" -eq 0 ]
   [[ "$output" == *"fetched only"* ]]
+}
+
+@test "w sync: missing origin/<default> after fetch exits 2" {
+  _sync_fixture_unmoved
+  git -C "$TEST_DIR/remote.git" branch -m main trunk
+  git -C "$TEST_DIR/remote.git" symbolic-ref HEAD refs/heads/trunk
+  run _w_sync "$REPO" "$WTS"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"does not exist after fetch"* ]]
 }
 
 @test "w sync: fetch failure exits 1" {
@@ -871,7 +947,29 @@ _sync_fixture() {
   [ ! -f "$WTS/main/moved.txt" ]
 }
 
-@test "w sync: dispatches via worktree and rejects extra args" {
+@test "w sync: dispatcher reaches _w_sync from the main repo" {
+  git -C "$REPO" checkout --detach -q
+  cd "$REPO"
+  run worktree sync
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"fetched only"* ]]
+}
+
+@test "w sync: dispatcher -h prints usage" {
+  cd "$REPO"
+  run worktree sync -h
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage: w sync"* ]]
+}
+
+@test "w sync: dispatcher outside a repo fails" {
+  cd "$TEST_DIR"
+  run worktree sync
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Not in a git repository"* ]]
+}
+
+@test "w sync: dispatcher rejects extra args" {
   cd "$REPO"
   run worktree sync bogus
   [ "$status" -eq 1 ]

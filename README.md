@@ -72,6 +72,7 @@ worktree <branch>               cd into worktree if it exists, otherwise create 
 worktree rm [<branch>]          remove worktree & delete branch
 worktree ls [--all]             list worktrees (--all for all repos)
 worktree sync                   fetch + fast-forward the default-branch worktree
+                                (dirty trees are stashed only if a fast-forward is pending)
 worktree cd <branch>            cd into existing worktree
 worktree dev [<branch>]         launch tmux dev session
 worktree help                   show help
