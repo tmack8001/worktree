@@ -84,6 +84,18 @@ assert_exit_code() {
 # ── Test environment setup ─────────────────────────────────────────
 
 TEST_ROOT=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/w-test.XXXXXX")" && pwd -P)
+
+# A PATH with every tool except gh and tmux, so "not installed" tests hold
+# even on machines where those live in /usr/bin.
+NOTOOLS_BIN="$TEST_ROOT/notools-bin"
+mkdir -p "$NOTOOLS_BIN"
+for _d in /usr/bin /bin; do
+  for _f in "$_d"/*(N); do
+    _n="${_f:t}"
+    [[ "$_n" == (gh|tmux) ]] && continue
+    [[ -e "$NOTOOLS_BIN/$_n" ]] || ln -s "$_f" "$NOTOOLS_BIN/$_n" 2>/dev/null
+  done
+done
 SCRIPT_DIR="${0:A:h}"
 
 # Source w.zsh from repo root (one level up from tests/)
@@ -646,7 +658,7 @@ test_not_in_repo() {
 
     # Bare w should not error about "not in a git repository"
     # Hide fzf so _w_fzf_all returns quickly with "fzf not installed"
-    output=$(PATH="/usr/bin:/bin" w 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w 2>&1)
     if [[ "$output" != *"Not in a git repository"* ]]; then
       pass "bare w outside repo falls back to --all"
     else
@@ -654,7 +666,7 @@ test_not_in_repo() {
     fi
 
     # w ls outside repo should print, not require fzf
-    output=$(PATH="/usr/bin:/bin" w ls 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w ls 2>&1)
     if [[ "$output" != *"Not in a git repository"* && "$output" != *"fzf not installed"* ]]; then
       pass "w ls outside repo prints worktrees without fzf"
     else
@@ -699,7 +711,7 @@ TOML
 
     # Temporarily hide tmux from PATH
     local output
-    output=$(PATH="/usr/bin:/bin" w dev 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w dev 2>&1)
     if [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]; then
       # Either tmux isn't available (expected) or it is (also fine)
       pass "dev handles tmux availability correctly"
@@ -977,21 +989,21 @@ test_resolve_pr_url() {
   # Valid PR URL patterns — without gh available all should fail with the gh error,
   # not with "not a PR URL" (i.e. pattern matching must succeed).
   local output
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
   assert_contains "https pull url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   assert_contains "https pulls url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
   assert_contains "trailing slash url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
   assert_contains "http pull url reaches gh check" "$output" "gh CLI not installed"
 
   # /pulls/ must be normalised to /pull/ before gh is called —
   # the gh error message (or "Failed to resolve") must not contain /pulls/
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(PATH="$NOTOOLS_BIN" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   if [[ "$output" != *"/pulls/"* ]]; then
     pass "/pulls/ normalised to /pull/ before gh call"
   else
@@ -1084,7 +1096,7 @@ test_add_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w add "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w add "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w add pr-url without gh errors" "$output" "gh CLI not installed"
   )
 }
@@ -1097,7 +1109,7 @@ test_shortcut_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(PATH="$NOTOOLS_BIN" w "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w pr-url shortcut without gh errors" "$output" "gh CLI not installed"
   )
 }

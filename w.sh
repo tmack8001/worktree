@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 # worktree — git worktree helper (POSIX sh)
+# shellcheck disable=SC3043  # `local` is supported by dash, bash and zsh
 # Worktrees go in ../<repo-name>-worktrees/<branch>
 #
 # Usage:
@@ -172,8 +173,7 @@ _w_base_branch() {
   local config_file="$repo/.worktree.toml"
 
   if [ -f "$config_file" ]; then
-    local line key val in_section
-    in_section=0
+    local line key val
     while IFS= read -r line; do
       # strip comments
       line="${line%%#*}"
@@ -256,6 +256,7 @@ _w_load_config() {
             IFS="$IFS_SAVE"
             p=$(_w_trim "$p")
             # POSIX case for glob matching
+            # shellcheck disable=SC2254  # $p is an intentional glob
             case "$branch" in
               $p) matched_profile="$current_profile"; break ;;
             esac
@@ -844,7 +845,7 @@ EOF
     fi
 
     if [ $? -eq 0 ]; then
-      cd "$dest"
+      cd "$dest" || return
       # No-op for a bare clone (no working tree to copy from), kept for
       # symmetry so a non-bare source would still bootstrap.
       _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
@@ -869,7 +870,7 @@ _w_go() {
 
   local dest="$wtdir/$branch"
   if [ -d "$dest" ]; then
-    cd "$dest"
+    cd "$dest" || return
   else
     _w_add "$repo" "$wtdir" "$branch"
   fi
@@ -923,7 +924,7 @@ EOF
 
   if [ -d "$dest" ]; then
     echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
-    cd "$dest"
+    cd "$dest" || return
     return 0
   fi
 
@@ -952,7 +953,7 @@ EOF
   local wt_ok=$?
 
   if [ "$wt_ok" -eq 0 ]; then
-    cd "$dest"
+    cd "$dest" || return
     echo "  ✅ $(_w_short_path "$dest")"
     _w_bootstrap_deps "$repo" "$dest" "$branch"
   fi
@@ -1064,7 +1065,7 @@ EOF
   tmux kill-session -t "$session_guess" 2>/dev/null
 
   case "$PWD" in
-    "$dest"*) cd "$repo" ;;
+    "$dest"*) cd "$repo" || return ;;
   esac
 
   echo "🗑️  Removing worktree: $branch"
@@ -1087,7 +1088,7 @@ _w_cd() {
 
   local dest="$wtdir/$branch"
   if [ -d "$dest" ]; then
-    cd "$dest"
+    cd "$dest" || return
   else
     echo "No worktree at $dest"
     return 1
@@ -1255,7 +1256,7 @@ _w_fzf_pick() {
         --preview-window=right:50%)
 
   [ -z "$sel" ] && return
-  cd "${sel%%	*}"
+  cd "${sel%%	*}" || return
 }
 
 _w_fzf() {

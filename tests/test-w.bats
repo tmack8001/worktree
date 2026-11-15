@@ -6,6 +6,19 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+
+  # A PATH with every tool except gh and tmux, so "not installed" tests hold
+  # even on machines where those live in /usr/bin.
+  NOTOOLS_BIN="$BATS_FILE_TMPDIR/notools-bin"
+  mkdir -p "$NOTOOLS_BIN"
+  for d in /usr/bin /bin; do
+    for f in "$d"/*; do
+      n="${f##*/}"
+      case "$n" in gh|tmux) continue ;; esac
+      [ -e "$NOTOOLS_BIN/$n" ] || ln -s "$f" "$NOTOOLS_BIN/$n" 2>/dev/null
+    done
+  done
+  export NOTOOLS_BIN
 }
 
 setup() {
@@ -18,7 +31,7 @@ setup() {
   TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
   export TEST_DIR
 
-  git init --bare "$TEST_DIR/remote.git" -q
+  git init --bare -b main "$TEST_DIR/remote.git" -q
   git clone       "$TEST_DIR/remote.git" "$TEST_DIR/repo" -q
   git -C "$TEST_DIR/repo" checkout -b main -q
   echo "init"   > "$TEST_DIR/repo/README.md"
@@ -246,8 +259,8 @@ run = "echo hi"
 TOML
   cd "$REPO"
   worktree add tmux-test 2>/dev/null
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH=/usr/bin:/bin worktree dev 2>&1"
-  [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$NOTOOLS_BIN' worktree dev 2>&1"
+  [[ "$output" == *"tmux not installed"* ]]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -260,7 +273,7 @@ TOML
 }
 
 @test "w (bare): falls back gracefully outside a git repo" {
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH=/usr/bin:/bin worktree 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$NOTOOLS_BIN' worktree 2>&1"
   [[ "$output" != *"Not in a git repository"* ]]
 }
 
@@ -278,10 +291,14 @@ TOML
 
 @test "w help: shows usage" {
   run worktree help
-  [[ "$output" == *"git worktree helper"* ]]
-  [[ "$output" == *"worktree dev"* ]]
-  [[ "$output" == *"worktree clone"* ]]
-  [[ "$output" == *"w, wt"* ]]
+  # strip ANSI escapes so the checks see plain text
+  local plain
+  plain=$(printf '%s' "$output" | sed $'s/\x1b\\[[0-9;]*m//g')
+  [[ "$plain" == *"git worktree helper"* ]]
+  [[ "$plain" == *"worktree dev"* ]]
+  [[ "$plain" == *"worktree clone"* ]]
+  [[ "$plain" == *"worktree sync"* ]]
+  [[ "$plain" == *"worktree (aliases: w, wt)"* || "$plain" == *"aliases: w, wt"* ]]
 }
 
 @test "w add --help: shows subcommand help" {
@@ -351,27 +368,27 @@ TOML
 }
 
 @test "_w_resolve_pr_url: errors when gh not installed" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: normalizes /pulls/ to /pull/ in error message" {
   # gh is not available so we can only confirm the URL is normalised
   # before gh is called (visible in the error output)
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
   # Returns non-zero (gh not found), but must NOT output /pulls/ in any
   # gh-related message — the URL was already normalised before that call
   [[ "$output" != *"/pulls/"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts http:// PR URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
   # gh not installed, but we get the gh error (not "not a PR URL")
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts trailing-slash URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && PATH='$NOTOOLS_BIN' _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
@@ -433,13 +450,13 @@ TOML
 
 @test "w add: PR URL without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree add 'https://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH='$NOTOOLS_BIN' worktree add 'https://github.com/org/repo/pull/1' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "w <pr-url>: PR URL shortcut without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree 'https://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH='$NOTOOLS_BIN' worktree 'https://github.com/org/repo/pull/1' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
