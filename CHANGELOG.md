@@ -8,17 +8,21 @@ its tag.
 
 ### Added
 
-- README "Supported environments": POSIX sh and bash 3.2+ for `w.sh`, zsh 5.x for `w.zsh`, macOS 14+, Ubuntu LTS
-  (22.04, 24.04), tmux 2.1+, each with what tests it and where; native Windows and Intel macOS are not covered.
+- README "Supported environments": POSIX sh and bash 3.2+ (the macOS system bash) for `w.sh`, zsh 5.x for
+  `w.zsh`, macOS 15+, Ubuntu 24.04 LTS and newer, tmux 2.1+, git 2.31+ (not verified at that floor), each with
+  what tests it and where; native Windows, Intel macOS and other distributions are not covered.
 - `make shells`: the bats suites with `w.sh`, `install.sh` and `scripts/build-release.sh` run under each shell in
   `SHELLS` (default dash, `bash --posix`, busybox ash, bash) through `TEST_SH`, as in ghid; bats itself runs under
   bash. A missing shell is skipped, and fails with `CI=true` or `REQUIRE_SHELLS`. `make test` is unchanged.
 - `make test-tmux TMUX_BIN=<tmux>`: only the tests that drive a real tmux, failing (not skipping) when tmux is
   missing. tmux 2.1, 2.2, 2.6, 2.9a, 3.0a, 3.2a, 3.3a, 3.4, 3.5a and 3.8 pass; 1.9a and 2.0 fail (no `=name`
   exact targets), hence the 2.1 floor.
-- CI jobs `shells` (ubuntu-22.04, ubuntu-24.04), `shells-macos` (macos-14, macos-latest: `/bin/sh`, `/bin/bash`
+- CI jobs `shells` (ubuntu-24.04, ubuntu-latest), `shells-macos` (macos-15, macos-latest: `/bin/sh`, `/bin/bash`
   3.2, `/bin/bash --posix`, dash, and the zsh suite) and `tmux` (2.1 built from source by
-  `scripts/build-tmux.sh` with a pinned SHA-256, the Ubuntu 22.04 and 24.04 packages, Homebrew's tmux).
+  `scripts/build-tmux.sh` with a pinned SHA-256, the Ubuntu 24.04 and ubuntu-latest packages, Homebrew's tmux).
+  macOS 14 and Ubuntu 22.04 are not in the support floor or the CI matrix: GitHub retired the macos-14 runner
+  image on 2026-11-02 and Apple no longer supports macOS 14; the ubuntu-22.04 image is deprecated (unsupported
+  from 2027-04-17). The tmux 2.1 build keeps the old-tmux floor tested on any runner.
 
 ### Fixed
 
