@@ -4,7 +4,7 @@ BATS       := bats
 SHELLCHECK := shellcheck
 VHS        := vhs
 
-TESTS      := tests/test-w.bats tests/test-install.bats
+TESTS      := tests/test-w.bats tests/test-install.bats tests/test-release.bats
 ZSH_TESTS  := tests/test-w.zsh
 DEMO_TAPE  := demo/demo.tape
 DEMO_GIF   := demo/demo.gif
@@ -14,7 +14,7 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "  test    run the BATS and zsh test suites"
-	@echo "  lint    shellcheck w.sh, install.sh and the bats suites"
+	@echo "  lint    shellcheck the scripts and the bats suites"
 	@echo "  demo    regenerate $(DEMO_GIF) via VHS"
 	@echo "  check   lint + test"
 	@echo "  deps    install maintainer dependencies (brew bundle)"
@@ -26,7 +26,7 @@ deps:
 
 .PHONY: lint
 lint:
-	$(SHELLCHECK) --shell=sh --severity=warning w.sh install.sh
+	$(SHELLCHECK) --shell=sh --severity=warning w.sh install.sh scripts/build-release.sh
 	$(SHELLCHECK) --severity=warning $(TESTS)
 
 .PHONY: test

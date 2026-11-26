@@ -260,10 +260,55 @@ Or explicitly via
 ```
 bats tests/test-w.bats # BATS suite (w.sh, requires bats-core)
 bats tests/test-install.bats # BATS suite (install.sh; fake curl, throwaway HOME)
+bats tests/test-release.bats # BATS suite (scripts/build-release.sh; needs GNU tar)
 zsh tests/test-w.zsh   # zsh-specific suite (w.zsh)
 ```
 
-Install test dependencies with `make deps` (requires Homebrew).
+Install test dependencies with `make deps` (requires Homebrew). The tests never start a real tmux server.
+`make lint` runs shellcheck on `w.sh`, `install.sh` and the bats suites.
+
+## Releasing
+
+Releases are made only by the `release` workflow (`.github/workflows/release.yml`), never by pushing a tag. In
+GitHub: Actions, **release**, **Run workflow** on branch `main`, with:
+
+- `version`: `X.Y.Z` (no `v`);
+- `commit` (optional): a full 40-hex commit on `main` to release; empty means the `main` commit you dispatch from.
+
+Before anything is published the workflow checks that it runs on `main` and that both commits are on `main`, that
+`version` is `X.Y.Z`, that neither the tag `vX.Y.Z` nor a release of that name exists, and that `CHANGELOG.md` has a
+`## [X.Y.Z]` section (used as the release notes). It runs the CI gates (lint, bats and zsh suites on ubuntu and
+macOS). For the dispatching commit it also requires `DEFAULT_REF="vX.Y.Z"` in `install.sh`. It builds
+`worktree-X.Y.Z.tar.gz` and `SHA256SUMS` from the release commit's tree with `scripts/build-release.sh`, twice, and
+requires identical bytes. Then it waits for approval of the `release` environment, attests build provenance, creates
+the tag `vX.Y.Z` at the release commit and publishes the release with both files.
+
+For an older `commit` the files come from that commit while the workflow and build script come from `main`. Two
+checks cannot hold for such a tree and are skipped, and the job summary says so: the `DEFAULT_REF` check when that
+`install.sh` has none, and that tree's own test suite.
+
+The intended first releases, after the v0.1.1 hotfix is merged to `main`:
+
+1. `version=0.1.0`, `commit=d8689577fe2adce8a35bb06be92482fed98ddd68` (the `main` commit before the hotfix);
+2. `version=0.1.1`, no `commit`.
+
+Build the same files locally (GNU tar required; on macOS `brew install gnu-tar`):
+
+```sh
+sh scripts/build-release.sh 0.1.1 dist            # from HEAD
+sh scripts/build-release.sh 0.1.0 dist d8689577fe2adce8a35bb06be92482fed98ddd68
+```
+
+To verify a download, put `worktree-X.Y.Z.tar.gz` and `SHA256SUMS` from the release in one directory and run:
+
+```sh
+grep ' worktree-X.Y.Z.tar.gz$' SHA256SUMS | sha256sum -c -     # macOS: shasum -a 256 -c -
+gh attestation verify worktree-X.Y.Z.tar.gz --repo tmack8001/worktree
+```
+
+The checksum only shows the file matches `SHA256SUMS`; the attestation shows it was built by this repository's
+workflow. Rebuilding with `scripts/build-release.sh` from the same commit should give the same bytes with GNU tar
+and GNU gzip (checked on Linux only; Apple's gzip compresses differently).
 
 ## Demo
 

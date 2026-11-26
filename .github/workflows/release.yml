@@ -1,0 +1,211 @@
+name: release
+
+# Releases ONE explicit version, on demand: Actions -> release -> Run workflow, on branch main.
+# The workflow creates the tag v<version> itself (nobody pushes release tags by hand) and the GitHub release.
+#
+#   version  X.Y.Z (required). Never a pre-release: ghid's convention marks only versions with a '-' as
+#            pre-releases (docs/decisions/publish-pre-release-tags-as-pre-releases.md in ghid), and this
+#            workflow accepts X.Y.Z only, so every release is a normal release, 0.x included.
+#   commit   optional full 40-hex SHA on main to tag and package; empty = the dispatching main commit.
+#            For an older commit (e.g. v0.1.0 = d8689577fe2adce8a35bb06be92482fed98ddd68) the build script and
+#            this workflow come from main HEAD and the packaged files from that commit's tree (git archive).
+#
+# Safety checks that always run: dispatched from refs/heads/main; the dispatching commit and the release commit
+# are on origin/main; version is X.Y.Z; neither the tag nor a release v<version> exists; CHANGELOG.md (main HEAD)
+# has a ## [X.Y.Z] section; the CI gates pass on main HEAD; the tarball builds twice with identical bytes;
+# publication waits for the protected `release` environment; build provenance is attested.
+# Checks that only hold for the dispatching commit and are skipped (and reported in the job summary) for an older
+# commit: install.sh DEFAULT_REF == v<version> when that tree's install.sh has no DEFAULT_REF, and running that
+# tree's own test suite.
+#
+# Inputs never reach a shell as code: every ${{ inputs.* }} is passed through env and quoted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, X.Y.Z (no leading v)"
+        required: true
+        type: string
+      commit:
+        description: "Full 40-hex commit on main to tag (empty = the dispatching main commit)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    # Every CI gate (lint, bats + zsh suites on ubuntu and macOS) on the dispatching main commit.
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          # all history, branches and tags: origin/main for the ancestry checks, the release commit's tree,
+          # and existing tags, without a credentialed fetch
+          fetch-depth: 0
+      - name: Check inputs, main, tag and release
+        id: check
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT_INPUT: ${{ inputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          fail() { echo "::error::$*" >&2; exit 1; }
+          [ "$GITHUB_REF" = refs/heads/main ] || fail "run this workflow on main (dispatched on $GITHUB_REF); nothing was released"
+          printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            || fail "version '$VERSION' is not X.Y.Z (no leading v, no pre-release or build suffix)"
+          git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null || fail "origin/main was not fetched"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main \
+            || fail "the dispatching commit $GITHUB_SHA is not on origin/main"
+          if [ -z "$COMMIT_INPUT" ]; then
+            COMMIT=$GITHUB_SHA
+          else
+            printf '%s\n' "$COMMIT_INPUT" | grep -Eq '^[0-9a-f]{40}$' || fail "commit must be a full 40-hex lowercase SHA, got '$COMMIT_INPUT'"
+            git cat-file -e "$COMMIT_INPUT^{commit}" 2>/dev/null || fail "commit $COMMIT_INPUT does not exist in this repository"
+            git merge-base --is-ancestor "$COMMIT_INPUT" refs/remotes/origin/main || fail "commit $COMMIT_INPUT is not on origin/main"
+            git merge-base --is-ancestor "$COMMIT_INPUT" "$GITHUB_SHA" || fail "commit $COMMIT_INPUT is not an ancestor of the dispatching commit $GITHUB_SHA"
+            COMMIT=$COMMIT_INPUT
+          fi
+          TAG="v$VERSION"
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then fail "tag $TAG already exists"; fi
+          # The API is the authority (a tag could be pushed after checkout): 404 = absent.
+          if out=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" 2>&1); then
+            fail "tag $TAG already exists on GitHub"
+          else
+            case $out in *"Not Found"*|*404*) ;; *) fail "cannot check whether tag $TAG exists: $out" ;; esac
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then fail "a release $TAG already exists"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          {
+            echo "## release $TAG"
+            echo ""
+            echo "- dispatching commit (workflow, build script, CI gates): \`$GITHUB_SHA\`"
+            echo "- release commit (tag target, packaged tree): \`$COMMIT\`"
+            echo "- on main, version format, tag and release absent: checked"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check install.sh DEFAULT_REF and the CHANGELOG entry
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          COMMIT: ${{ steps.check.outputs.commit }}
+        run: |
+          fail() { echo "::error::$*" >&2; exit 1; }
+          TAG="v$VERSION"
+          git show "$COMMIT:install.sh" > "$RUNNER_TEMP/install.sh"
+          ref=$(sed -n '/^DEFAULT_REF="/{s/^DEFAULT_REF="\([^"]*\)".*/\1/p;q;}' "$RUNNER_TEMP/install.sh")
+          if [ -n "$ref" ]; then
+            [ "$ref" = "$TAG" ] || fail "install.sh at $COMMIT has DEFAULT_REF=\"$ref\", expected \"$TAG\""
+            echo "- install.sh DEFAULT_REF = \`$ref\`: checked" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$COMMIT" != "$GITHUB_SHA" ]; then
+            echo "::warning::install.sh at $COMMIT has no DEFAULT_REF (it predates pinned downloads): check skipped"
+            echo "- install.sh DEFAULT_REF: **skipped**, install.sh at \`$COMMIT\` predates DEFAULT_REF (its downloads track main)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            fail "install.sh has no DEFAULT_REF=\"$TAG\" line"
+          fi
+          # The CHANGELOG is read from main HEAD, so it can describe an older release commit too.
+          grep -Fqx "## [$VERSION]" CHANGELOG.md || fail "CHANGELOG.md has no '## [$VERSION]' section"
+          awk -v h="## [$VERSION]" '$0 == h { on = 1; next } on && /^## \[/ { exit } on { print }' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md" || fail "the CHANGELOG.md section for $VERSION is empty"
+          echo "- CHANGELOG.md section \`## [$VERSION]\`: checked" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p dist-notes && cp "$RUNNER_TEMP/notes.md" dist-notes/notes.md
+      - name: Report the test suite that ran
+        env:
+          COMMIT: ${{ steps.check.outputs.commit }}
+        run: |
+          if [ "$COMMIT" = "$GITHUB_SHA" ]; then
+            echo "- test suite: the CI gates ran on the release commit" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- test suite of \`$COMMIT\`: **skipped**, that tree's tests predate the fix for the real-tmux hang and are not run; the CI gates ran on main HEAD \`$GITHUB_SHA\` instead" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Build tarball and SHA256SUMS (twice, must be identical)
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          COMMIT: ${{ steps.check.outputs.commit }}
+        run: |
+          tar --version | head -n 1
+          gzip --version | head -n 1
+          sh scripts/build-release.sh "$VERSION" dist "$COMMIT"
+          sh scripts/build-release.sh "$VERSION" dist-again "$COMMIT"
+          cmp dist/SHA256SUMS dist-again/SHA256SUMS
+          cmp "dist/worktree-$VERSION.tar.gz" "dist-again/worktree-$VERSION.tar.gz"
+          (cd dist && sha256sum -c SHA256SUMS)
+          {
+            echo "- tarball: built twice, identical; SHA256SUMS verified"
+            echo ""
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir publish
+          cp "dist/worktree-$VERSION.tar.gz" dist/SHA256SUMS dist-notes/notes.md publish/
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-dist
+          path: publish/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # The owner creates the `release` environment (Settings -> Environments) with a required reviewer and
+    # deployment branches limited to main; the job only names it.
+    environment: release
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: release-dist
+          path: publish
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@c4fbc648846ca6f503a13a2281a5e7b98aa57202 # v2.0.1
+        with:
+          subject-path: |
+            publish/worktree-*.tar.gz
+            publish/SHA256SUMS
+      - name: Create the tag at the release commit
+        # The git refs API creates the ref only if it does not exist (422 otherwise), so a tag that appeared since
+        # the build job is never moved. It is a lightweight tag on the release commit.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$COMMIT" >/dev/null
+          got=$(gh api "repos/$GH_REPO/git/ref/tags/v$VERSION" --jq .object.sha)
+          [ "$got" = "$COMMIT" ] || { echo "::error::tag v$VERSION points at $got, expected $COMMIT" >&2; exit 1; }
+          echo "- tag \`v$VERSION\` created at \`$COMMIT\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "v$VERSION" "publish/worktree-$VERSION.tar.gz" publish/SHA256SUMS \
+            --verify-tag --title "v$VERSION" --notes-file publish/notes.md
+          echo "- release \`v$VERSION\` published" >> "$GITHUB_STEP_SUMMARY"

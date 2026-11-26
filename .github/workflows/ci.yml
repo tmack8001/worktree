@@ -1,0 +1,63 @@
+name: ci
+
+# Lint and test on every pull request and every push to main; release.yml calls it as its gate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Only superseded pull request runs are cancelled; a push to main or a release gate always finishes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    # make lint: shellcheck on w.sh and install.sh (as sh) and on the bats suites. Uses the runner image's
+    # shellcheck (not pinned); the version is printed for the log.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: shellcheck version
+        run: shellcheck --version
+      - run: make lint
+
+  test:
+    # make test: the bats suites (w.sh, install.sh, build-release.sh) and the zsh suite (w.zsh).
+    # The suites start no real tmux server (tests stub tmux and isolate TMUX_TMPDIR), stdin is /dev/null and
+    # output a pipe, so a hang is a bug; timeout-minutes bounds it anyway.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install bats and zsh (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bats zsh
+      - name: Install bats and GNU tar (macOS; zsh ships with macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v bats >/dev/null 2>&1 || brew install bats-core
+          command -v gtar >/dev/null 2>&1 || brew install gnu-tar
+      - name: Tool versions
+        run: |
+          bats --version
+          zsh --version
+          git --version
+      - name: make test
+        timeout-minutes: 15
+        run: make test < /dev/null
