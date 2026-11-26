@@ -441,6 +441,79 @@ TOML
   [ "$status" -ne 0 ]
 }
 
+# An explicit branch is looked up in `git worktree list`, never mapped to
+# <worktrees>/<branch>.
+
+@test "w rm <branch>: removes the worktree git has the branch in, whatever its directory" {
+  cd "$REPO"
+  git -C "$REPO" worktree add -q -b feature/deep "$WTS/flat-dir"
+  run bash -c "echo feature/deep | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm feature/deep 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/flat-dir" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/feature/deep
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm <branch>: never removes a worktree only because its directory has the branch's name" {
+  cd "$REPO"
+  # $WTS/foo holds branch bar; branch foo lives in $WTS/other
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" worktree add -q -b foo "$WTS/other"
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/foo" ]
+  [ "$(git -C "$WTS/foo" symbolic-ref HEAD)" = "refs/heads/bar" ]
+  [ ! -d "$WTS/other" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/foo
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm <branch>: a branch with no worktree fails closed without prompting" {
+  cd "$REPO"
+  git -C "$REPO" branch lonely
+  mkdir -p "$WTS/lonely"
+  run bash -c "echo lonely | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm lonely 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'lonely' checked out"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  [ -d "$WTS/lonely" ]
+  git -C "$REPO" show-ref --verify --quiet refs/heads/lonely
+}
+
+@test "w rm <branch>: the branch of the main working tree is refused" {
+  cd "$REPO"
+  run bash -c "echo main | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm main 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"checked out in the main working tree ($REPO)"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  git -C "$REPO" show-ref --verify --quiet refs/heads/main
+}
+
+@test "w dev <branch>: starts the session in the worktree git has the slash branch in" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" worktree add -q -b feature/devdeep "$WTS/devflat"
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$REPO"
+  run worktree dev feature/devdeep
+  [ "$status" -eq 0 ]
+  grep -q -- "^new-session -d -s repo-feature-devdeep -c $WTS/devflat " "$TEST_DIR/tmux.log"
+}
+
+@test "w dev <branch>: a branch with no worktree fails closed" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" branch devlonely
+  mkdir -p "$WTS/devlonely"
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$REPO"
+  run worktree dev devlonely
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'devlonely' checked out"* ]]
+  run grep -c 'new-session' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
+}
+
 @test "w dev: without a branch, uses the slash branch checked out here" {
   _write_dev_toml
   _fake_tmux

@@ -437,6 +437,78 @@ test_rm_guess_from_worktree() {
   )
 }
 
+# An explicit branch is looked up in `git worktree list`, never mapped to
+# <worktrees>/<branch>.
+test_branch_arg_from_git() {
+  echo "── w rm / w dev <branch>: worktree path from git ──"
+  local repo
+  repo=$(setup_repo "barg")
+  local wts="$TEST_ROOT/barg-worktrees"
+
+  (
+    cd "$repo"
+    git -C "$repo" worktree add -q -b feature/deep "$wts/flat-dir"
+    local output rc
+    output=$(echo "feature/deep" | w rm feature/deep 2>&1); rc=$?
+    assert_exit_code "rm <slash branch> in a differently named dir succeeds" "0" "$rc"
+    assert_dir_not_exists "rm removed the dir git has the branch in" "$wts/flat-dir"
+    git -C "$repo" show-ref --verify --quiet refs/heads/feature/deep \
+      && fail "rm deleted feature/deep" || pass "rm deleted feature/deep"
+
+    # $wts/foo holds branch bar; branch foo lives in $wts/other
+    git -C "$repo" worktree add -q -b bar "$wts/foo"
+    git -C "$repo" worktree add -q -b foo "$wts/other"
+    output=$(echo "foo" | w rm foo 2>&1); rc=$?
+    assert_exit_code "rm foo succeeds" "0" "$rc"
+    assert_eq "rm foo leaves the dir named foo (branch bar)" "refs/heads/bar" \
+      "$(git -C "$wts/foo" symbolic-ref HEAD 2>/dev/null)"
+    assert_dir_not_exists "rm foo removes the worktree git has foo in" "$wts/other"
+
+    git -C "$repo" branch lonely
+    mkdir -p "$wts/lonely"
+    output=$(echo "lonely" | w rm lonely 2>&1); rc=$?
+    assert_exit_code "rm of a branch with no worktree fails" "1" "$rc"
+    assert_contains "rm says the branch has no worktree" "$output" "No worktree has branch 'lonely' checked out"
+    [[ "$output" != *"Type the name"* ]] && pass "rm of a branch with no worktree does not prompt" \
+      || fail "rm of a branch with no worktree prompted"
+    assert_dir_exists "rm of a branch with no worktree keeps the dir" "$wts/lonely"
+
+    output=$(echo "main" | w rm main 2>&1); rc=$?
+    assert_exit_code "rm of the main working tree's branch fails" "1" "$rc"
+    assert_contains "rm names the main working tree" "$output" "checked out in the main working tree ($repo)"
+    git -C "$repo" show-ref --verify --quiet refs/heads/main \
+      && pass "rm keeps main" || fail "rm deleted main"
+  )
+
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+TOML
+  local bin="$TEST_ROOT/barg-bin"
+  _zt_fake_tmux "$bin"
+  (
+    cd "$repo"
+    git -C "$repo" worktree add -q -b feature/devdeep "$wts/devflat"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev feature/devdeep 2>&1); rc=$?
+    assert_exit_code "dev <slash branch> in a differently named dir succeeds" "0" "$rc"
+    if grep -q -- "^new-session -d -s barg-feature-devdeep -c $wts/devflat " "$bin/tmux.log"; then
+      pass "dev starts in the dir git has the branch in"
+    else
+      fail "dev did not start in $wts/devflat"
+    fi
+
+    : > "$bin/tmux.log"
+    git -C "$repo" branch devlonely
+    mkdir -p "$wts/devlonely"
+    output=$(PATH="$bin:$PATH" w dev devlonely 2>&1); rc=$?
+    assert_exit_code "dev of a branch with no worktree fails" "1" "$rc"
+    assert_contains "dev says the branch has no worktree" "$output" "No worktree has branch 'devlonely' checked out"
+    grep -q 'new-session' "$bin/tmux.log" && fail "dev started a session without a worktree" \
+      || pass "dev starts no session without a worktree"
+  )
+}
+
 test_dev_guess_from_worktree() {
   echo "── w dev (no branch: derived from the worktree) ──"
   local repo
@@ -1800,6 +1872,7 @@ test_dep_dirs_toml
 test_setup_skipped_by_default
 test_dev_commands_gated
 test_dev_guess_from_worktree
+test_branch_arg_from_git
 test_tmux_exact_match
 test_tmux_names
 test_gh_override

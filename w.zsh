@@ -82,6 +82,29 @@ _w_worktree_branch() {
   printf '%s' "${ref#refs/heads/}"
 }
 
+# Print the worktree that has branch $2 checked out, as git records it in
+# `git worktree list --porcelain` for repo $1 (never a path built from the
+# branch name: a worktree's directory need not match its branch). The path is
+# checked to be a worktree of the same repository with that branch checked
+# out, and printed physical (symlinks resolved).
+# Fails with 1 when no worktree has the branch, and with 2 (printing its path)
+# when only the main working tree has it.
+_w_branch_worktree_path() {
+  local repo="$1" branch="$2" wt top common rc=0
+  wt=$(git -C "$repo" worktree list --porcelain 2>/dev/null | W_REF="refs/heads/$branch" awk '
+    /^worktree / { wt = substr($0, 10); n++; next }
+    $0 == "branch " ENVIRON["W_REF"] { print wt; rc = (n == 1) ? 2 : 0; found = 1; exit }
+    END { if (!found) exit 1; exit rc }') || rc=$?
+  (( rc == 0 )) || { printf '%s' "$wt"; return $rc; }
+  [[ -n "$wt" && -d "$wt" ]] || return 1
+  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [[ "$(cd "$top" && pwd -P)" == "$(cd "$wt" && pwd -P)" ]] || return 1
+  [[ "$(_w_worktree_branch "$wt")" == "$branch" ]] || return 1
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [[ "$(cd "$common" && pwd -P)" == "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ]] || return 1
+  (cd "$wt" && pwd -P)
+}
+
 # ── tmux session names ─────────────────────────────────────────────
 #
 # tmux does not store a session name as given: it replaces '.' and ':' with
@@ -974,7 +997,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
   if [[ ! -d "$dest" ]]; then
     echo "No worktree at $dest"
@@ -1014,7 +1045,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
 
   if [[ ! -d "$dest" ]]; then

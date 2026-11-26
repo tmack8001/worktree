@@ -24,6 +24,13 @@ its tag.
   `w rm` did not kill it. One helper (`_w_session_name`) maps `.`, `:`, `\`, `$` and every byte outside printable
   ASCII to `_`, including a profile's `session` override, and is used for new-session, has-session,
   attach-session, kill-session and the window targets (`w.sh`, `w.zsh`).
+- `w rm <branch>` and `w dev <branch>` take the worktree from `git worktree list --porcelain` (the entry with
+  `branch refs/heads/<branch>`, checked to be a worktree of the same repository with that branch checked out)
+  instead of assuming `<worktrees>/<branch>`. Before, a worktree in a directory not named after its branch was not
+  found, a plain directory of that name was used for `w dev`, and `w rm foo` removed whatever worktree was in the
+  directory `foo` even when it had another branch checked out. A branch with no worktree now fails with
+  "No worktree has branch '<branch>' checked out", and the main working tree's branch with "checked out in the main
+  working tree", both before the confirmation prompt (`w.sh`, `w.zsh`).
 
 ## [0.1.1]
 
