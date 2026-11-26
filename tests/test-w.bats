@@ -405,6 +405,67 @@ TOML
   [ -d "$WTS/abort-branch" ]
 }
 
+@test "w rm: without a branch, removes the slash-branch worktree we are in" {
+  cd "$REPO"
+  worktree add feature/foo >/dev/null 2>&1
+  mkdir -p "$WTS/feature/foo/sub"
+  run bash -c "echo 'feature/foo' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/foo/sub' && worktree rm 2>&1)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"delete branch 'feature/foo'"* ]]
+  [ ! -d "$WTS/feature/foo" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/feature/foo
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm: without a branch, a detached HEAD fails closed" {
+  cd "$REPO"
+  git -C "$REPO" worktree add --detach "$WTS/feature/detached" -q
+  run bash -c "echo 'feature' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/detached' && worktree rm 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"HEAD is detached"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  [ -d "$WTS/feature/detached" ]
+}
+
+@test "w rm: without a branch, works in a repo path with spaces" {
+  local sp="$TEST_DIR/my repo"
+  git clone -q "$TEST_DIR/remote.git" "$sp"
+  cd "$sp"
+  worktree add feature/spaced >/dev/null 2>&1
+  [ -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
+  cd "$TEST_DIR/my repo-worktrees/feature/spaced"
+  run bash -c 'echo "feature/spaced" | (source "$REPO_ROOT/w.sh" && worktree rm 2>&1)'
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
+  run git -C "$sp" show-ref --verify --quiet refs/heads/feature/spaced
+  [ "$status" -ne 0 ]
+}
+
+@test "w dev: without a branch, uses the slash branch checked out here" {
+  _write_dev_toml
+  _fake_tmux
+  cd "$REPO"
+  worktree add feature/devslash >/dev/null 2>&1
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/feature/devslash"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  grep -q -- '-s repo-feature-devslash ' "$TEST_DIR/tmux.log"
+}
+
+@test "w dev: without a branch, a detached HEAD fails closed" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" worktree add --detach "$WTS/feature/devdetached" -q
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/feature/devdetached"
+  run worktree dev
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"HEAD is detached"* ]]
+  run grep -c 'new-session' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
+}
+
 # ── worktree dev ───────────────────────────────────────────────────
 
 @test "w dev: fails without .worktree.toml" {

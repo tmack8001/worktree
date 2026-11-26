@@ -75,6 +75,28 @@ _w_trim() {
   printf '%s' "${1%"${1##*[! 	]}"}"
 }
 
+# Print the top directory of the worktree containing the current directory,
+# if that worktree lives under the worktrees dir $1; fail otherwise.
+_w_current_worktree_path() (
+  top=''
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  case "$top" in
+    "$1"/?*) printf '%s' "$top" ;;
+    *)       return 1 ;;
+  esac
+)
+
+# Print the branch checked out in worktree $1, as git records it (so a branch
+# with slashes is kept whole). Fail when HEAD is detached or not a branch.
+_w_worktree_branch() (
+  ref=''
+  ref=$(git -C "$1" symbolic-ref -q HEAD 2>/dev/null) || return 1
+  case "$ref" in
+    refs/heads/?*) printf '%s' "${ref#refs/heads/}" ;;
+    *)             return 1 ;;
+  esac
+)
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -986,19 +1008,21 @@ EOF
     return 1
   fi
 
+  # Without a branch, use the worktree we are in: the branch git has checked
+  # out there, never a guess from the directory name.
+  dest=''
   if [ -z "$branch" ]; then
-    case "$PWD" in
-      "$wtdir"/*)
-        branch="${PWD#"$wtdir"/}"
-        branch="${branch%%/*}"
-        ;;
-      *)
-        echo "Not inside a worktree. Specify a branch: worktree dev <branch>"
-        return 1 ;;
-    esac
+    dest=$(_w_current_worktree_path "$wtdir") || {
+      echo "Not inside a worktree. Specify a branch: worktree dev <branch>"
+      return 1
+    }
+    branch=$(_w_worktree_branch "$dest") || {
+      echo "HEAD is detached in $dest (no branch). Specify a branch: worktree dev <branch>"
+      return 1
+    }
+  else
+    dest="$wtdir/$branch"
   fi
-
-  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
@@ -1024,19 +1048,21 @@ EOF
       return 0 ;;
   esac
 
+  # Without a branch, use the worktree we are in: the branch git has checked
+  # out there, never a guess from the directory name.
+  dest=''
   if [ -z "$branch" ]; then
-    case "$PWD" in
-      "$wtdir"/*)
-        branch="${PWD#"$wtdir"/}"
-        branch="${branch%%/*}"
-        ;;
-      *)
-        echo "Not inside a worktree. Specify a branch: worktree rm <branch>"
-        return 1 ;;
-    esac
+    dest=$(_w_current_worktree_path "$wtdir") || {
+      echo "Not inside a worktree. Specify a branch: worktree rm <branch>"
+      return 1
+    }
+    branch=$(_w_worktree_branch "$dest") || {
+      echo "HEAD is detached in $dest (no branch). Specify a branch: worktree rm <branch>"
+      return 1
+    }
+  else
+    dest="$wtdir/$branch"
   fi
-
-  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
@@ -1057,8 +1083,9 @@ EOF
   session_guess="${repo_base}-${branch_safe}"
   tmux kill-session -t "$session_guess" 2>/dev/null
 
-  case "$PWD" in
-    "$dest"*) _w_chdir "$repo" || return 1 ;;
+  # Leave the worktree first if we are in it (or below it).
+  case "$(pwd -P)" in
+    "$dest"|"$dest"/*) _w_chdir "$repo" || return 1 ;;
   esac
 
   echo "🗑️  Removing worktree: $branch"

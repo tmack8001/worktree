@@ -389,6 +389,93 @@ test_rm_wrong_confirm() {
   )
 }
 
+test_rm_guess_from_worktree() {
+  echo "── w rm (no branch: derived from the worktree) ──"
+  local repo
+  repo=$(setup_repo "rm-guess")
+  local wts="$TEST_ROOT/rm-guess-worktrees"
+
+  (
+    cd "$repo"
+    w add feature/foo >/dev/null 2>&1
+    mkdir -p "$wts/feature/foo/sub"
+    cd "$wts/feature/foo/sub"
+    local output rc
+    output=$(echo "feature/foo" | w rm 2>&1); rc=$?
+    assert_exit_code "rm in slash-branch worktree succeeds" "0" "$rc"
+    assert_contains "rm names the whole slash branch" "$output" "delete branch 'feature/foo'"
+    assert_dir_not_exists "slash-branch worktree removed" "$wts/feature/foo"
+    if git -C "$repo" show-ref --verify --quiet refs/heads/feature/foo; then
+      fail "slash branch deleted"
+    else
+      pass "slash branch deleted"
+    fi
+  )
+
+  (
+    git -C "$repo" worktree add --detach "$wts/feature/detached" -q
+    cd "$wts/feature/detached"
+    local output rc
+    output=$(echo "feature" | w rm 2>&1); rc=$?
+    assert_exit_code "rm with detached HEAD fails" "1" "$rc"
+    assert_contains "rm with detached HEAD says so" "$output" "HEAD is detached"
+    [[ "$output" != *"Type the name"* ]] && pass "rm with detached HEAD does not prompt" \
+      || fail "rm with detached HEAD guessed a branch and prompted"
+    assert_dir_exists "detached worktree kept" "$wts/feature/detached"
+  )
+
+  (
+    local sp="$TEST_ROOT/rm guess spaced"
+    git clone -q "$TEST_ROOT/rm-guess-bare.git" "$sp" 2>/dev/null
+    cd "$sp"
+    w add feature/spaced >/dev/null 2>&1
+    cd "$sp-worktrees/feature/spaced"
+    local output rc
+    output=$(echo "feature/spaced" | w rm 2>&1); rc=$?
+    assert_exit_code "rm in a path with spaces succeeds" "0" "$rc"
+    assert_dir_not_exists "worktree in a path with spaces removed" "$sp-worktrees/feature/spaced"
+  )
+}
+
+test_dev_guess_from_worktree() {
+  echo "── w dev (no branch: derived from the worktree) ──"
+  local repo
+  repo=$(setup_repo "dev-guess")
+  local wts="$TEST_ROOT/dev-guess-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+TOML
+  local bin="$TEST_ROOT/dev-guess-bin"
+  _zt_fake_tmux "$bin"
+
+  (
+    cd "$repo"
+    w add feature/devslash >/dev/null 2>&1
+    cd "$wts/feature/devslash"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev in slash-branch worktree succeeds" "0" "$rc"
+    if grep -q -- '-s dev-guess-feature-devslash ' "$bin/tmux.log"; then
+      pass "dev session named after the whole slash branch"
+    else
+      fail "dev session not named after the whole slash branch"
+    fi
+
+    : > "$bin/tmux.log"
+    git -C "$repo" worktree add --detach "$wts/feature/devdetached" -q
+    cd "$wts/feature/devdetached"
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with detached HEAD fails" "1" "$rc"
+    assert_contains "dev with detached HEAD says so" "$output" "HEAD is detached"
+    if grep -q 'new-session' "$bin/tmux.log"; then
+      fail "dev with detached HEAD started a session"
+    else
+      pass "dev with detached HEAD starts no session"
+    fi
+  )
+}
+
 test_help() {
   echo "── w help ──"
   local output
@@ -1519,6 +1606,7 @@ test_ls
 test_ls_outside_worktree
 test_rm
 test_rm_wrong_confirm
+test_rm_guess_from_worktree
 test_help
 test_subcommand_help
 test_load_config_profile_matching
@@ -1555,6 +1643,7 @@ test_bootstrap_deps
 test_dep_dirs_toml
 test_setup_skipped_by_default
 test_dev_commands_gated
+test_dev_guess_from_worktree
 test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────
