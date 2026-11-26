@@ -22,6 +22,12 @@ its tag.
 
 ### Fixed
 
+- `w.sh`: `worktree` no longer leaves a `w-cd.*` file in `$TMPDIR` when it is killed mid-run. The file that
+  carries the directory to `cd` into out of the command's subshell is now opened (to write on fd 9, to read back
+  on fd 8) and removed before the command starts, so it has no name while the command runs; no trap is set and
+  the caller's traps and fds 8 and 9 are kept. A pipe was not used because it would wait for every process that
+  inherits it (a tmux server started by `w dev`, a detached `git gc`, a background setup command). `w dev`
+  starts tmux with fd 9 closed. `w.zsh` runs in the caller's shell and never used such a file.
 - `w dev` sends each window's `run` command to that window, and selects the `shell` window, by the window id
   tmux prints when it creates the window (`new-session`/`new-window -P -F '#{window_id}'`, targets `@N`) instead
   of `=session:name`. A window name containing `.` (a pane separator in a target) got no command, and a name

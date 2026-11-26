@@ -595,6 +595,36 @@ test_switch_from_git() {
   )
 }
 
+# w.zsh's worktree runs in the caller's shell and cd's directly: unlike w.sh
+# it needs no file to pass the directory out, and creates none, even killed.
+test_no_cd_temp_file() {
+  echo "── worktree creates no temp file (w.zsh) ──"
+  local repo
+  repo=$(setup_repo "nocd")
+  local tmp="$TEST_ROOT/nocd-tmp"
+  mkdir -p "$tmp"
+  cat > "$repo/.worktree.toml" <<TOML
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch '$TEST_ROOT/nocd-started'; while [ ! -e '$TEST_ROOT/nocd-release' ]; do sleep 1; done"
+TOML
+  (
+    cd "$repo"
+    TMPDIR="$tmp" w cd main >/dev/null 2>&1
+    assert_eq "w cd leaves TMPDIR empty" "" "$(ls -A "$tmp")"
+  )
+  WORKTREE_ALLOW_REPO_COMMANDS=1 TMPDIR="$tmp" zsh -c 'source "$1"; cd "$2" && worktree add killed' zsh \
+    "$SCRIPT_DIR/../w.zsh" "$repo" </dev/null >/dev/null 2>&1 &
+  local pid=$! n=0
+  while [[ ! -e "$TEST_ROOT/nocd-started" ]] && (( n < 100 )); do sleep 0.1; (( n++ )); done
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  touch "$TEST_ROOT/nocd-release"
+  assert_eq "worktree killed mid-run leaves TMPDIR empty" "" "$(ls -A "$tmp")"
+}
+
 test_dev_guess_from_worktree() {
   echo "── w dev (no branch: derived from the worktree) ──"
   local repo
@@ -2097,6 +2127,7 @@ test_dev_commands_gated
 test_dev_guess_from_worktree
 test_branch_arg_from_git
 test_switch_from_git
+test_no_cd_temp_file
 test_tmux_exact_match
 test_tmux_names
 test_tmux_window_names

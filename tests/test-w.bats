@@ -1572,6 +1572,71 @@ _cfg_dir_count() {
   [ -z "${W_CFG_PROFILE:-}" ]
 }
 
+# ── worktree's cd result file ──────────────────────────────────────
+#
+# w.sh passes the directory to cd into out of its subshell through a w-cd.*
+# temp file, which used to stay in $TMPDIR when worktree was killed mid-run.
+
+_cd_file_count() {
+  find "$TMPDIR" -maxdepth 1 -name 'w-cd.*' | wc -l | tr -d ' '
+}
+
+@test "w-cd: worktree leaves no w-cd file after a cd or a failure" {
+  _private_tmpdir
+  cd "$REPO"
+  worktree add cdfile >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/cdfile" ]
+  cd "$REPO"
+  worktree cd cdfile >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/cdfile" ]
+  run worktree cd no-such-branch
+  [ "$status" -eq 1 ]
+  [ "$(_cd_file_count)" = "0" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "w-cd: worktree keeps the caller's traps and its fds 8 and 9" {
+  _private_tmpdir
+  cd "$REPO"
+  worktree add cdfds >/dev/null 2>&1
+  run $W_SH -c '
+    . "$1"; cd "$2" || exit 1
+    trap "echo user-trap" USR1
+    before=$(trap)
+    exec 8>"$3/fd8" 9>"$3/fd9"
+    worktree cd cdfds || exit 1
+    [ "$(trap)" = "$before" ] || { echo "traps changed: $(trap)"; exit 1; }
+    echo eight >&8; echo nine >&9
+    pwd -P' sh "$REPO_ROOT/w.sh" "$REPO" "$TEST_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$WTS/cdfds" ]
+  [ "$(cat "$TEST_DIR/fd8")" = "eight" ]
+  [ "$(cat "$TEST_DIR/fd9")" = "nine" ]
+  [ "$(_cd_file_count)" = "0" ]
+}
+
+@test "w-cd: worktree killed with TERM mid-run leaves no w-cd file" {
+  _private_tmpdir
+  # a setup command that signals it has started, then waits to be released
+  cat > "$REPO/.worktree.toml" <<TOML
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch '$TEST_DIR/started'; while [ ! -e '$TEST_DIR/release' ]; do sleep 1; done"
+TOML
+  WORKTREE_ALLOW_REPO_COMMANDS=1 $W_SH -c '. "$1"; cd "$2" && worktree add killed' sh \
+    "$REPO_ROOT/w.sh" "$REPO" </dev/null >/dev/null 2>&1 3>&- &
+  local pid=$! n=0
+  while [ ! -e "$TEST_DIR/started" ] && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+  [ -e "$TEST_DIR/started" ]
+  kill -0 "$pid"                    # still running: the kill lands mid-run
+  kill -TERM "$pid"
+  wait "$pid" || true
+  touch "$TEST_DIR/release"         # let the orphaned setup command finish
+  [ "$(_cd_file_count)" = "0" ]
+}
+
 # ── TOML config parser ─────────────────────────────────────────────
 
 @test "_w_load_config: matches fe/* to frontend profile" {

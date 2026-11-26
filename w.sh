@@ -797,7 +797,9 @@ EOF
   # (@N), never by name: a name from .worktree.toml may contain '.' or ':',
   # which split a `session:window.pane` target, or repeat another window's.
   shell_id=''
-  shell_id=$(tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell" -P -F '#{window_id}')
+  # (fd 9 closed: the tmux server it starts would keep worktree's result
+  # file, see worktree(), open for as long as it runs.)
+  shell_id=$(tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell" -P -F '#{window_id}' 9>&-)
   case "$shell_id" in
     @*) ;;
     *) echo "  ❌ tmux did not report the new session's window — aborting session"
@@ -840,12 +842,23 @@ EOF
 # POSIX sh has no `local`, so worktree runs each command in a subshell
 # (_w_main) and helpers that only print are subshell functions too: nothing
 # they assign reaches the calling shell. The one effect the caller must see,
-# the directory change, is written by _w_chdir to a temp file and applied
-# here. The positional parameters are this function's only scratch storage,
-# so it sets no variables either. _w_repo_info, _w_load_config and
+# the directory change, is written by _w_chdir to file descriptor 9 and
+# applied here. The positional parameters are this function's only scratch
+# storage, so it sets no variables either. _w_repo_info, _w_load_config and
 # _w_run_setup stay brace functions because callers read what they set
 # (W_MAIN_REPO, W_WORKTREES_DIR, the W_CFG_* config); they only ever run inside that
 # subshell (or a test).
+#
+# Why a file at all: the directory has to come out of nested subshells, and a
+# pipe (command substitution) would wait for every process that inherits its
+# write end, such as a tmux server started by `w dev`, a detached `git gc` or
+# a background setup command, so `worktree` would hang until they exit. So the
+# temp file is opened twice (fd 9 to write, fd 8 to read back) and removed at
+# once, before _w_main starts: from then on it has no name and nothing can be
+# left behind, however the command ends (even killed), without a trap. Only
+# the few steps between mktemp and that rm can leave it. The redirections are
+# on a command group, so the caller's own fds 8 and 9 (if any) are restored
+# afterwards, and the caller's traps are never touched.
 
 worktree() {
   set -- "$(mktemp "${TMPDIR:-/tmp}/w-cd.XXXXXX" 2>/dev/null)" "$@"
@@ -853,21 +866,25 @@ worktree() {
     echo "worktree: cannot create a temp file in ${TMPDIR:-/tmp}" >&2
     return 1
   fi
-  # `&& ||` keeps a failing command from aborting here under `set -e`, so the
-  # temp file is always removed.
-  (_W_CD_FILE=$1; shift; _w_main "$@") && set -- 0 "$1" || set -- "$?" "$1"
-  if [ -s "$2" ]; then
-    cd "$(cat "$2")" || set -- 1 "$2"
+  {
+    rm -f "$1"
+    # `&& ||` keeps a failing command from aborting here under `set -e`, so
+    # the result is always read back.
+    (_W_CD_FD=9; shift; _w_main "$@" 8<&-) && set -- 0 || set -- "$?"
+    set -- "$1" "$(cat <&8)"
+  } 8<"$1" 9>"$1"
+  if [ -n "$2" ]; then
+    cd "$2" || set -- 1 "$2"
   fi
-  rm -f "$2"
   return "$1"
 }
 
-# cd into $1 and, inside `worktree`, record it so the caller's shell follows.
+# cd into $1 and, inside `worktree`, record it (on fd 9) so the caller's
+# shell follows. A command changes directory at most once.
 _w_chdir() {
   cd "$1" || return
-  if [ -n "${_W_CD_FILE:-}" ]; then
-    printf '%s' "$PWD" > "$_W_CD_FILE"
+  if [ -n "${_W_CD_FD:-}" ]; then
+    printf '%s' "$PWD" >&9
   fi
   return 0
 }
