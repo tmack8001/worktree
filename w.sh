@@ -75,6 +75,28 @@ _w_trim() {
   printf '%s' "${1%"${1##*[! 	]}"}"
 }
 
+# Print the top directory of the worktree containing the current directory,
+# if that worktree lives under the worktrees dir $1; fail otherwise.
+_w_current_worktree_path() (
+  top=''
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  case "$top" in
+    "$1"/?*) printf '%s' "$top" ;;
+    *)       return 1 ;;
+  esac
+)
+
+# Print the branch checked out in worktree $1, as git records it (so a branch
+# with slashes is kept whole). Fail when HEAD is detached or not a branch.
+_w_worktree_branch() (
+  ref=''
+  ref=$(git -C "$1" symbolic-ref -q HEAD 2>/dev/null) || return 1
+  case "$ref" in
+    refs/heads/?*) printf '%s' "${ref#refs/heads/}" ;;
+    *)             return 1 ;;
+  esac
+)
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -233,19 +255,22 @@ _w_base_branch() (
 # Writes results to temp files since sh can't use global arrays.
 # Callers read: $W_CFG_DIR/profile, setup_cmds, pre_cmds,
 #               window_names, window_dirs, window_cmds
+# On success the caller owns $W_CFG_DIR and must call _w_cfg_cleanup when
+# done with it. On failure nothing is left behind and W_CFG_DIR is empty.
+# (No trap: this runs in the user's shell, whose own traps stay untouched.)
 
 _w_load_config() {
   config_file="$1" branch="$2"
 
-  W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX")
+  W_CFG_DIR=''
+  [ -f "$config_file" ] || return 1
+  W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX") || { W_CFG_DIR=''; return 1; }
   : > "$W_CFG_DIR/profile"
   : > "$W_CFG_DIR/setup_cmds"
   : > "$W_CFG_DIR/pre_cmds"
   : > "$W_CFG_DIR/window_names"
   : > "$W_CFG_DIR/window_dirs"
   : > "$W_CFG_DIR/window_cmds"
-
-  [ -f "$config_file" ] || return 1
 
   # First pass: find matching profile
   line='' current_profile='' matched_profile="" p='' patterns=''
@@ -289,6 +314,7 @@ _w_load_config() {
     if grep -q '^\[profile\.default\]' "$config_file" 2>/dev/null; then
       matched_profile="default"
     else
+      _w_cfg_cleanup
       return 1
     fi
   fi
@@ -370,6 +396,14 @@ _w_load_config() {
   done < "$config_file"
 
   return 0
+}
+
+# Remove the directory a successful _w_load_config left in $W_CFG_DIR.
+_w_cfg_cleanup() {
+  case "${W_CFG_DIR:-}" in
+    */w-cfg.?*) rm -rf "$W_CFG_DIR" ;;
+  esac
+  W_CFG_DIR=''
 }
 
 # Replace line N (1-based) in a file with a value
@@ -525,6 +559,7 @@ _w_resolve_dep_dirs() (
   if [ -f "$cfg" ] && _w_load_config "$cfg" "$branch" 2>/dev/null; then
     prof=$(_w_cfg_get dep_dirs)
     [ -n "$prof" ] && dirs="$dirs $prof"
+    _w_cfg_cleanup
   fi
 
   # dedupe, preserving first-seen order (no case-pattern expansion)
@@ -620,9 +655,10 @@ _w_dev() (
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
   session_name="${session_override:-${repo_base}-${branch_safe}}"
 
-  if tmux has-session -t "$session_name" 2>/dev/null; then
+  if tmux has-session -t "=$session_name" 2>/dev/null; then
+    _w_cfg_cleanup
     echo "🔌 Reattaching to $session_name"
-    tmux attach-session -t "$session_name"
+    tmux attach-session -t "=$session_name"
     return 0
   fi
 
@@ -641,6 +677,7 @@ _w_dev() (
       echo "  ⚙️  $cmd"
       if ! (cd "$dest" && eval "$cmd"); then
         echo "  ❌ Failed — aborting session"
+        _w_cfg_cleanup
         return 1
       fi
     done < "$W_CFG_DIR/pre_cmds"
@@ -669,15 +706,16 @@ _w_dev() (
     esac
 
     echo "  🪟 $wname"
-    tmux new-window -t "$session_name" -n "$wname" -c "$wdir"
+    tmux new-window -t "=$session_name:" -n "$wname" -c "$wdir"
     if [ -n "$wcmd" ] && [ "$allow" -eq 1 ]; then
-      tmux send-keys -t "$session_name:$wname" "$wcmd" Enter
+      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
     fi
     i=$((i + 1))
   done
 
-  tmux select-window -t "$session_name:shell"
-  tmux attach-session -t "$session_name"
+  _w_cfg_cleanup
+  tmux select-window -t "=${session_name}:shell"
+  tmux attach-session -t "=$session_name"
 )
 
 # ── Core commands ──────────────────────────────────────────────────
@@ -831,7 +869,10 @@ EOF
       # No-op for a bare clone (no working tree to copy from), kept for
       # symmetry so a non-bare source would still bootstrap.
       _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
-      [ -f "$dest/.worktree.toml" ] && _w_run_setup "$dest" "$bare_dir" "$branch"
+      if [ -f "$dest/.worktree.toml" ]; then
+        _w_run_setup "$dest" "$bare_dir" "$branch"
+        _w_cfg_cleanup
+      fi
     fi
   fi
 )
@@ -951,7 +992,8 @@ EOF
   if [ "$wt_ok" -eq 0 ] && [ -f "$repo/.worktree.toml" ]; then
     _w_run_setup "$dest" "$repo" "$branch"
     win_count=''
-    win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
+    [ -n "${W_CFG_DIR:-}" ] && win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
+    _w_cfg_cleanup
     if [ "${win_count:-0}" -gt 0 ]; then
       echo ""
       echo "Run 'worktree dev' to launch tmux session."
@@ -986,19 +1028,21 @@ EOF
     return 1
   fi
 
+  # Without a branch, use the worktree we are in: the branch git has checked
+  # out there, never a guess from the directory name.
+  dest=''
   if [ -z "$branch" ]; then
-    case "$PWD" in
-      "$wtdir"/*)
-        branch="${PWD#"$wtdir"/}"
-        branch="${branch%%/*}"
-        ;;
-      *)
-        echo "Not inside a worktree. Specify a branch: worktree dev <branch>"
-        return 1 ;;
-    esac
+    dest=$(_w_current_worktree_path "$wtdir") || {
+      echo "Not inside a worktree. Specify a branch: worktree dev <branch>"
+      return 1
+    }
+    branch=$(_w_worktree_branch "$dest") || {
+      echo "HEAD is detached in $dest (no branch). Specify a branch: worktree dev <branch>"
+      return 1
+    }
+  else
+    dest="$wtdir/$branch"
   fi
-
-  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
@@ -1024,19 +1068,21 @@ EOF
       return 0 ;;
   esac
 
+  # Without a branch, use the worktree we are in: the branch git has checked
+  # out there, never a guess from the directory name.
+  dest=''
   if [ -z "$branch" ]; then
-    case "$PWD" in
-      "$wtdir"/*)
-        branch="${PWD#"$wtdir"/}"
-        branch="${branch%%/*}"
-        ;;
-      *)
-        echo "Not inside a worktree. Specify a branch: worktree rm <branch>"
-        return 1 ;;
-    esac
+    dest=$(_w_current_worktree_path "$wtdir") || {
+      echo "Not inside a worktree. Specify a branch: worktree rm <branch>"
+      return 1
+    }
+    branch=$(_w_worktree_branch "$dest") || {
+      echo "HEAD is detached in $dest (no branch). Specify a branch: worktree rm <branch>"
+      return 1
+    }
+  else
+    dest="$wtdir/$branch"
   fi
-
-  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
@@ -1055,10 +1101,11 @@ EOF
   repo_base=$(basename "$repo")
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
   session_guess="${repo_base}-${branch_safe}"
-  tmux kill-session -t "$session_guess" 2>/dev/null
+  tmux kill-session -t "=$session_guess" 2>/dev/null
 
-  case "$PWD" in
-    "$dest"*) _w_chdir "$repo" || return 1 ;;
+  # Leave the worktree first if we are in it (or below it).
+  case "$(pwd -P)" in
+    "$dest"|"$dest"/*) _w_chdir "$repo" || return 1 ;;
   esac
 
   echo "🗑️  Removing worktree: $branch"

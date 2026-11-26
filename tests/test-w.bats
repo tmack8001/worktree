@@ -405,6 +405,67 @@ TOML
   [ -d "$WTS/abort-branch" ]
 }
 
+@test "w rm: without a branch, removes the slash-branch worktree we are in" {
+  cd "$REPO"
+  worktree add feature/foo >/dev/null 2>&1
+  mkdir -p "$WTS/feature/foo/sub"
+  run bash -c "echo 'feature/foo' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/foo/sub' && worktree rm 2>&1)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"delete branch 'feature/foo'"* ]]
+  [ ! -d "$WTS/feature/foo" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/feature/foo
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm: without a branch, a detached HEAD fails closed" {
+  cd "$REPO"
+  git -C "$REPO" worktree add --detach "$WTS/feature/detached" -q
+  run bash -c "echo 'feature' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/detached' && worktree rm 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"HEAD is detached"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  [ -d "$WTS/feature/detached" ]
+}
+
+@test "w rm: without a branch, works in a repo path with spaces" {
+  local sp="$TEST_DIR/my repo"
+  git clone -q "$TEST_DIR/remote.git" "$sp"
+  cd "$sp"
+  worktree add feature/spaced >/dev/null 2>&1
+  [ -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
+  cd "$TEST_DIR/my repo-worktrees/feature/spaced"
+  run bash -c 'echo "feature/spaced" | (source "$REPO_ROOT/w.sh" && worktree rm 2>&1)'
+  [ "$status" -eq 0 ]
+  [ ! -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
+  run git -C "$sp" show-ref --verify --quiet refs/heads/feature/spaced
+  [ "$status" -ne 0 ]
+}
+
+@test "w dev: without a branch, uses the slash branch checked out here" {
+  _write_dev_toml
+  _fake_tmux
+  cd "$REPO"
+  worktree add feature/devslash >/dev/null 2>&1
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/feature/devslash"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  grep -q -- '-s repo-feature-devslash ' "$TEST_DIR/tmux.log"
+}
+
+@test "w dev: without a branch, a detached HEAD fails closed" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" worktree add --detach "$WTS/feature/devdetached" -q
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/feature/devdetached"
+  run worktree dev
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"HEAD is detached"* ]]
+  run grep -c 'new-session' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
+}
+
 # ── worktree dev ───────────────────────────────────────────────────
 
 @test "w dev: fails without .worktree.toml" {
@@ -432,6 +493,99 @@ TOML
   [ "$status" -eq 1 ]
   [[ "$output" == *"tmux not installed"* ]]
   [[ "$output" != *"Starting dev session"* ]]
+}
+
+# ── tmux sessions are matched by exact name ────────────────────────
+#
+# These use the real tmux against the private server under TEST_DIR (see
+# setup). A plain `-t name` also matches a session whose name only starts with
+# `name`; worktree must never kill or attach such a session.
+
+# Start a detached session on the private server. Its output and bats' fd 3
+# are closed so the server cannot keep bats' pipes open.
+_tmux_session() {
+  "$REAL_TMUX" new-session -d -s "$1" </dev/null >/dev/null 2>&1 3>&-
+}
+
+_tmux_has() {
+  "$REAL_TMUX" has-session -t "=$1" </dev/null >/dev/null 2>&1 3>&-
+}
+
+# A tmux on PATH that passes everything to the real tmux, except that
+# attach-session (which needs a terminal) logs the session its target
+# resolves to (list-windows takes a target-session, as attach-session does).
+_attach_logging_tmux() {
+  mkdir -p "$TEST_DIR/bin"
+  cat > "$TEST_DIR/bin/tmux" <<FAKE
+#!/bin/sh
+if [ "\$1" = attach-session ]; then
+  [ "\$2" = -t ] || exit 1
+  "$REAL_TMUX" list-windows -t "\$3" -F '#{session_name}' 2>/dev/null | head -n 1 >> "$TEST_DIR/attach.log"
+  exit
+fi
+exec "$REAL_TMUX" "\$@"
+FAKE
+  chmod +x "$TEST_DIR/bin/tmux"
+  : > "$TEST_DIR/attach.log"
+}
+
+@test "tmux exact: w rm does not kill a session that only starts with the name" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/foo" ]
+  _tmux_has repo-foo-bar
+}
+
+@test "tmux exact: w rm kills its own session and leaves the longer one" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _tmux_session repo-foo
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has repo-foo
+  [ "$status" -ne 0 ]
+  _tmux_has repo-foo-bar
+}
+
+@test "tmux exact: w dev does not attach a session that only starts with the name" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/foo"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Reattaching"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
+  _tmux_has repo-foo
+  # the new windows went to repo-foo, none to repo-foo-bar
+  [ "$("$REAL_TMUX" list-windows -t =repo-foo-bar -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+  [ "$("$REAL_TMUX" list-windows -t =repo-foo -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+}
+
+@test "tmux exact: w dev reattaches its own session, not the longer one" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _tmux_session repo-foo
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/foo"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to repo-foo"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -904,6 +1058,89 @@ _gh_setup() {
   cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"Examples:"* ]]
+}
+
+# ── _w_load_config temp dirs ───────────────────────────────────────
+
+# Point TMPDIR at a private, empty dir so w-cfg.* dirs can be counted.
+_private_tmpdir() {
+  mkdir -p "$TEST_DIR/tmp"
+  export TMPDIR="$TEST_DIR/tmp"
+}
+
+_cfg_dir_count() {
+  find "$TMPDIR" -maxdepth 1 -name 'w-cfg.*' | wc -l | tr -d ' '
+}
+
+@test "w-cfg: _w_load_config leaves no temp dir for a missing config" {
+  _private_tmpdir
+  _w_load_config "$TEST_DIR/nope.toml" anything || true
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: _w_load_config leaves no temp dir when no profile matches" {
+  _private_tmpdir
+  printf '[profile.fe]\nbranches = "fe/*"\n' > "$TEST_DIR/test.toml"
+  local rc=0
+  _w_load_config "$TEST_DIR/test.toml" be/x || rc=$?
+  [ "$rc" -eq 1 ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: _w_cfg_cleanup removes the dir of a successful load" {
+  _private_tmpdir
+  printf '[profile.default]\nbranches = "*"\n' > "$TEST_DIR/test.toml"
+  _w_load_config "$TEST_DIR/test.toml" anything
+  [ "$(_cfg_dir_count)" = "1" ]
+  [ "$(head -1 "$W_CFG_DIR/profile")" = "default" ]
+  _w_cfg_cleanup
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: w add, w dev and their error paths leave no temp dirs" {
+  _private_tmpdir
+  _write_dev_toml
+  printf '\n[[profile.default.setup]]\nrun = "true"\n' >> "$REPO/.worktree.toml"
+  _fake_tmux
+  cd "$REPO"
+
+  # normal: add (dep-dir lookup + setup) and dev
+  worktree add cfg-normal >/dev/null 2>&1
+  [ -d "$WTS/cfg-normal" ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  cd "$WTS/cfg-normal"
+  PATH="$TEST_DIR/bin:$PATH" worktree dev >/dev/null 2>&1
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # error: an allowed pre command fails and dev aborts
+  printf '[profile.default]\nbranches = "*"\n\n[[profile.default.pre]]\nrun = "false"\n' > "$REPO/.worktree.toml"
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  PATH="$TEST_DIR/bin:$PATH" run worktree dev
+  unset WORKTREE_ALLOW_REPO_COMMANDS
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"aborting session"* ]]
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # error: no profile matches the branch
+  printf '[profile.fe]\nbranches = "fe/*"\n' > "$REPO/.worktree.toml"
+  cd "$REPO"
+  worktree add cfg-nomatch >/dev/null 2>&1
+  cd "$WTS/cfg-nomatch"
+  run worktree dev
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no matching profile"* ]]
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # missing config
+  rm "$REPO/.worktree.toml"
+  cd "$REPO"
+  worktree add cfg-missing >/dev/null 2>&1
+  [ -d "$WTS/cfg-missing" ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "${W_CFG_DIR:-}" ]
 }
 
 # ── TOML config parser ─────────────────────────────────────────────

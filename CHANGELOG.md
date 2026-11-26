@@ -4,6 +4,21 @@ Each release has a `## [X.Y.Z]` section. The release workflow (`.github/workflow
 release a version without one, and uses the section as the GitHub release notes. A release's date is the date of
 its tag.
 
+## [Unreleased]
+
+### Fixed
+
+- `w rm` and `w dev` without a branch, run inside a worktree, now take the branch git has checked out there
+  (`git symbolic-ref HEAD` in the worktree found by `git rev-parse --show-toplevel`) instead of the first path
+  segment, so inside `feature/foo` they act on `feature/foo`, not `feature`. A detached HEAD fails with
+  "HEAD is detached" instead of guessing (`w.sh`, `w.zsh`).
+- tmux sessions are matched by exact name (`=name`, `=name:`, `=name:window` targets). Before, `w rm foo` could kill
+  and `w dev foo` could attach a session whose name only starts with the guessed name (e.g. `repo-foo-bar` when
+  there was no `repo-foo`) (`w.sh`, `w.zsh`).
+- `w.sh`: `_w_load_config` no longer leaves `w-cfg.*` directories in `$TMPDIR`: none is created for a missing
+  config, it is removed when no profile matches, and `w add`, `w clone`, `w dev` and the dependency-dir lookup
+  remove it when done (no trap is set).
+
 ## [0.1.1]
 
 Safety hotfix.
