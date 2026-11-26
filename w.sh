@@ -102,8 +102,10 @@ _w_worktree_branch() (
 # branch name: a worktree's directory need not match its branch). The path is
 # checked to be a worktree of the same repository with that branch checked
 # out, and printed physical (symlinks resolved).
-# Fails with 1 when no worktree has the branch, and with 2 (printing its path)
-# when only the main working tree has it.
+# Fails with 1 when no worktree has the branch, with 2 (printing its path)
+# when only the main working tree has it, and with 3 (printing the path git
+# records) when git lists the branch in a worktree that is missing or fails
+# those checks (e.g. a deleted directory not yet pruned).
 _w_branch_worktree_path() (
   repo="$1" branch="$2" wt='' rc=0 top='' common=''
   wt=$(git -C "$repo" worktree list --porcelain 2>/dev/null | W_REF="refs/heads/$branch" awk '
@@ -111,13 +113,37 @@ _w_branch_worktree_path() (
     $0 == "branch " ENVIRON["W_REF"] { print wt; rc = (n == 1) ? 2 : 0; found = 1; exit }
     END { if (!found) exit 1; exit rc }') || rc=$?
   [ "$rc" -eq 0 ] || { printf '%s' "$wt"; return "$rc"; }
-  [ -n "$wt" ] && [ -d "$wt" ] || return 1
-  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ "$(cd "$top" && pwd -P)" = "$(cd "$wt" && pwd -P)" ] || return 1
-  [ "$(_w_worktree_branch "$wt")" = "$branch" ] || return 1
-  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [ "$(cd "$common" && pwd -P)" = "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ] || return 1
+  [ -n "$wt" ] && [ -d "$wt" ] || { printf '%s' "$wt"; return 3; }
+  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || { printf '%s' "$wt"; return 3; }
+  [ "$(cd "$top" && pwd -P)" = "$(cd "$wt" && pwd -P)" ] || { printf '%s' "$wt"; return 3; }
+  [ "$(_w_worktree_branch "$wt")" = "$branch" ] || { printf '%s' "$wt"; return 3; }
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { printf '%s' "$wt"; return 3; }
+  [ "$(cd "$common" && pwd -P)" = "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ] || { printf '%s' "$wt"; return 3; }
   cd "$wt" && pwd -P
+)
+
+# Find the worktree for an EXISTING checkout of branch $2 in repo $1, for
+# commands that switch to it (w cd, w <branch>, w add). Prints the directory
+# and succeeds when git has the branch checked out in a worktree or in the
+# main working tree (saying so for the latter). Fails with 1, printing
+# nothing, when no worktree has it (the caller may then create one), and with
+# 3 after printing why to stderr when git lists it somewhere unusable.
+_w_switch_target() (
+  dest='' rc=0
+  dest=$(_w_branch_worktree_path "$1" "$2") || rc=$?
+  case $rc in
+    0) printf '%s' "$dest" ;;
+    2) if [ -d "$dest" ]; then
+         echo "↩️  Branch '$2' is checked out in the main working tree — switching to $dest" >&2
+         printf '%s' "$dest"
+       else
+         echo "Branch '$2' is checked out in the main working tree ($dest), which is not a directory" >&2
+         return 3
+       fi ;;
+    1) return 1 ;;
+    *) echo "git lists branch '$2' as checked out in $dest, which is not a usable worktree of this repository (see: git worktree list; git worktree prune)" >&2
+       return 3 ;;
+  esac
 )
 
 # ── tmux session names ─────────────────────────────────────────────
@@ -857,7 +883,7 @@ _w_main() {
     add) _w_add "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     rm)  _w_rm  "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     ls)  _w_ls  "$W_MAIN_REPO" "${2:-}" ;;
-    cd)  _w_cd  "$W_WORKTREES_DIR" "${2:-}" ;;
+    cd)  _w_cd  "$W_MAIN_REPO" "${2:-}" ;;
     dev) _w_dev_cmd "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     "")  _w_fzf "$W_MAIN_REPO" "$W_WORKTREES_DIR" ;;
     *)   _w_go  "$W_MAIN_REPO" "$W_WORKTREES_DIR" "$1" ;;
@@ -962,12 +988,15 @@ _w_go() (
     return 1
   fi
 
-  dest="$wtdir/$branch"
-  if [ -d "$dest" ]; then
-    _w_chdir "$dest"
-  else
-    _w_add "$repo" "$wtdir" "$branch"
-  fi
+  # An existing checkout of the branch is wherever git has it; only a branch
+  # with no worktree gets a new one (from _w_add).
+  dest='' rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) _w_chdir "$dest" ;;
+    1) _w_add "$repo" "$wtdir" "$branch" ;;
+    *) return 1 ;;
+  esac
 )
 
 _w_add() (
@@ -1019,12 +1048,25 @@ EOF
     return 1
   fi
 
-  dest="$wtdir/$branch"
+  # git refuses to check one branch out twice: if it is checked out already
+  # (in a worktree wherever it is, or in the main working tree), switch there.
+  dest='' rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
+       _w_chdir "$dest"
+       return ;;
+    1) ;;
+    *) return 1 ;;
+  esac
 
-  if [ -d "$dest" ]; then
-    echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
-    _w_chdir "$dest"
-    return
+  # No worktree has the branch: create one at <worktrees>/<branch>, but never
+  # in a path that is already taken (by another branch's worktree or anything
+  # else).
+  dest="$wtdir/$branch"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    echo "$dest already exists but does not have branch '$branch' checked out: not creating a worktree there"
+    return 1
   fi
 
   mkdir -p "$wtdir"
@@ -1194,7 +1236,7 @@ EOF
 )
 
 _w_cd() (
-  wtdir="$1" branch="$2"
+  repo="$1" branch="$2"
 
   case "$branch" in
     --help|-h)
@@ -1205,13 +1247,15 @@ _w_cd() (
 
   [ -z "$branch" ] && { echo "usage: w cd <branch>"; return 1; }
 
-  dest="$wtdir/$branch"
-  if [ -d "$dest" ]; then
-    _w_chdir "$dest"
-  else
-    echo "No worktree at $dest"
-    return 1
-  fi
+  # The worktree git has the branch checked out in, wherever it is.
+  dest='' rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) _w_chdir "$dest" ;;
+    1) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+       return 1 ;;
+    *) return 1 ;;
+  esac
 )
 
 _w_ls() (

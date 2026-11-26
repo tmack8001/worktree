@@ -378,6 +378,122 @@ TOML
   [[ "$output" == *"No worktree"* ]]
 }
 
+# An existing branch's worktree is found with git (`git worktree list`),
+# never assumed to be <worktrees>/<branch>.
+
+@test "w cd <branch>: goes to the worktree git has the slash branch in, whatever its directory" {
+  git -C "$REPO" worktree add -q -b feature/cdflat "$WTS/cd-flat"
+  cd "$REPO"
+  worktree cd feature/cdflat
+  [ "$(pwd -P)" = "$WTS/cd-flat" ]
+}
+
+@test "w cd <branch>: never goes to a directory only because it has the branch's name" {
+  # $WTS/foo holds branch bar; branch foo lives in $WTS/other
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" worktree add -q -b foo "$WTS/other"
+  cd "$REPO"
+  worktree cd foo
+  [ "$(pwd -P)" = "$WTS/other" ]
+}
+
+@test "w cd <branch>: the main working tree's branch goes to the main working tree" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree cd main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  worktree cd main 2>/dev/null
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w cd <branch>: a branch with no worktree fails closed, even with a directory of its name" {
+  git -C "$REPO" branch lonely
+  mkdir -p "$WTS/lonely"
+  cd "$REPO"
+  run worktree cd lonely
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'lonely' checked out"* ]]
+  worktree cd lonely >/dev/null 2>&1 || true
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w cd <branch>: a worktree git lists but whose directory is gone fails closed" {
+  git -C "$REPO" worktree add -q -b gone "$WTS/gone-dir"
+  rm -rf "$WTS/gone-dir"
+  cd "$REPO"
+  run worktree cd gone
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"git lists branch 'gone' as checked out in $WTS/gone-dir, which is not a usable worktree"* ]]
+}
+
+@test "w <branch>: switches to the worktree git has the branch in instead of creating another" {
+  git -C "$REPO" worktree add -q -b feature/goflat "$WTS/go-flat"
+  cd "$REPO"
+  run worktree feature/goflat
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Creating worktree"* ]]
+  [ ! -e "$WTS/feature/goflat" ]
+  worktree feature/goflat >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/go-flat" ]
+}
+
+@test "w <branch>: the main working tree's branch switches there, no worktree is created" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  [[ "$output" != *"Creating worktree"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/main" ]
+  worktree main >/dev/null 2>&1
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w <branch>: an existing branch with no worktree gets a new one under the worktrees dir" {
+  git -C "$REPO" branch feature/fresh
+  cd "$REPO"
+  worktree feature/fresh >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/feature/fresh" ]
+  [ "$(git -C "$WTS/feature/fresh" symbolic-ref HEAD)" = "refs/heads/feature/fresh" ]
+}
+
+@test "w add <branch>: a branch checked out elsewhere switches there instead of failing" {
+  git -C "$REPO" worktree add -q -b feature/addflat "$WTS/add-flat"
+  cd "$REPO"
+  run worktree add feature/addflat
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already exists"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/feature/addflat" ]
+  worktree add feature/addflat >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/add-flat" ]
+}
+
+@test "w add <branch>: the main working tree's branch switches there" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree add main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/main" ]
+  [ "$(git -C "$REPO" worktree list --porcelain | grep -c '^worktree ')" = "2" ]
+}
+
+@test "w add <branch>: never uses a directory of the branch's name that has another branch" {
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" branch foo
+  cd "$REPO"
+  run worktree add foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$WTS/foo already exists but does not have branch 'foo' checked out"* ]]
+  [ "$(git -C "$WTS/foo" symbolic-ref HEAD)" = "refs/heads/bar" ]
+  worktree add foo >/dev/null 2>&1 || true
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
 # ── worktree ls ────────────────────────────────────────────────────
 
 @test "w ls: lists worktrees including branches" {

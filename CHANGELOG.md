@@ -22,6 +22,16 @@ its tag.
 
 ### Fixed
 
+- `w cd <branch>`, `w <branch>` and `w add <branch>` take an existing branch's worktree from
+  `git worktree list --porcelain` (as `w rm` and `w dev` do) instead of assuming `<worktrees>/<branch>`. Before,
+  `w cd` failed for a worktree in a directory not named after its branch and went into a directory of the
+  branch's name that had another branch (or none) checked out; `w <branch>` and `w add` then tried to create a
+  second checkout, which git refuses, and the main working tree's branch (e.g. `w main` from a worktree) failed
+  in `git worktree add`. Now a branch checked out in a worktree switches there, one checked out in the main
+  working tree switches to it (saying so), and one git lists in a missing or unusable worktree fails with a
+  message naming that path. `w cd` of a branch with no worktree fails with "No worktree has branch '<branch>'
+  checked out". Only a branch with no worktree gets a new one at `<worktrees>/<branch>`, and `w add`/`w <branch>`
+  now refuse to create it when that path already exists (`w.sh`, `w.zsh`).
 - A branch (or `session` override) containing `#` or `;` now gets a tmux session that `w dev` and `w rm` find:
   tmux expands formats such as `#S`, `#{...}` and `##` in a new session's name (2.9a and later; 3.8 also drops a
   trailing `#`) and takes an argument ending in `;` as a command separator, so `w dev` created a new session

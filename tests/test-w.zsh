@@ -509,6 +509,92 @@ TOML
   )
 }
 
+test_switch_from_git() {
+  echo "── w cd / w <branch> / w add: existing worktree found with git ──"
+  local repo
+  repo=$(setup_repo "swg")
+  local wts="$TEST_ROOT/swg-worktrees"
+  git -C "$repo" worktree add -q -b feature/cdflat "$wts/cd-flat"
+  git -C "$repo" worktree add -q -b bar "$wts/foo"
+  git -C "$repo" worktree add -q -b foo "$wts/other"
+  git -C "$repo" branch lonely
+  mkdir -p "$wts/lonely"
+  git -C "$repo" worktree add -q -b gone "$wts/gone-dir"
+  rm -rf "$wts/gone-dir"
+
+  (
+    local output rc
+    cd "$repo"
+    w cd feature/cdflat
+    assert_eq "cd <slash branch> goes to the dir git has it in" "$wts/cd-flat" "$PWD"
+    cd "$repo"
+    w cd foo
+    assert_eq "cd foo goes to the worktree with branch foo, not the dir named foo" "$wts/other" "$PWD"
+    output=$(w cd main 2>&1); rc=$?
+    assert_exit_code "cd main succeeds" "0" "$rc"
+    assert_contains "cd main says it is the main working tree" "$output" "checked out in the main working tree"
+    w cd main 2>/dev/null
+    assert_eq "cd main goes to the main working tree" "$repo" "$PWD"
+    output=$(w cd lonely 2>&1); rc=$?
+    assert_exit_code "cd to a branch with no worktree fails" "1" "$rc"
+    assert_contains "cd says the branch has no worktree" "$output" "No worktree has branch 'lonely' checked out"
+    w cd lonely >/dev/null 2>&1
+    assert_eq "cd to a branch with no worktree stays put" "$repo" "$PWD"
+    output=$(w cd gone 2>&1); rc=$?
+    assert_exit_code "cd to a pruned-away worktree fails" "1" "$rc"
+    assert_contains "cd names the unusable worktree" "$output" \
+      "git lists branch 'gone' as checked out in $wts/gone-dir, which is not a usable worktree"
+  )
+
+  git -C "$repo" worktree add -q -b feature/goflat "$wts/go-flat"
+  git -C "$repo" branch feature/fresh
+  (
+    local output rc
+    cd "$repo"
+    output=$(w feature/goflat 2>&1); rc=$?
+    assert_exit_code "w <branch> elsewhere succeeds" "0" "$rc"
+    [[ "$output" != *"Creating worktree"* ]] && pass "w <branch> elsewhere creates nothing" \
+      || fail "w <branch> elsewhere created a worktree"
+    assert_dir_not_exists "w <branch> elsewhere makes no <worktrees>/<branch>" "$wts/feature/goflat"
+    w feature/goflat >/dev/null 2>&1
+    assert_eq "w <branch> goes to the dir git has it in" "$wts/go-flat" "$PWD"
+
+    cd "$wts/go-flat"
+    output=$(w main 2>&1); rc=$?
+    assert_exit_code "w main succeeds" "0" "$rc"
+    [[ "$output" != *"Creating worktree"* && "$output" != *fatal* ]] && pass "w main creates nothing" \
+      || fail "w main tried to create a worktree: $output"
+    assert_dir_not_exists "w main makes no <worktrees>/main" "$wts/main"
+    w main >/dev/null 2>&1
+    assert_eq "w main goes to the main working tree" "$repo" "$PWD"
+
+    w feature/fresh >/dev/null 2>&1
+    assert_eq "w <branch with no worktree> creates <worktrees>/<branch>" "$wts/feature/fresh" "$PWD"
+
+    cd "$repo"
+    output=$(w add feature/goflat 2>&1); rc=$?
+    assert_exit_code "add of a branch checked out elsewhere succeeds" "0" "$rc"
+    assert_contains "add says it already exists" "$output" "Already exists"
+    w add feature/goflat >/dev/null 2>&1
+    assert_eq "add switches to the dir git has it in" "$wts/go-flat" "$PWD"
+
+    output=$(w add main 2>&1); rc=$?
+    assert_exit_code "add main succeeds" "0" "$rc"
+    [[ "$output" != *fatal* ]] && pass "add main does not fail in git" || fail "add main: $output"
+    assert_dir_not_exists "add main makes no <worktrees>/main" "$wts/main"
+
+    cd "$repo"
+    git -C "$repo" worktree remove "$wts/other"
+    output=$(w add foo 2>&1); rc=$?
+    assert_exit_code "add foo with \$wts/foo holding bar fails" "1" "$rc"
+    assert_contains "add foo says the dir is taken" "$output" \
+      "$wts/foo already exists but does not have branch 'foo' checked out"
+    assert_eq "add foo leaves bar's worktree alone" "refs/heads/bar" "$(git -C "$wts/foo" symbolic-ref HEAD)"
+    w add foo >/dev/null 2>&1
+    assert_eq "add foo stays put" "$repo" "$PWD"
+  )
+}
+
 test_dev_guess_from_worktree() {
   echo "── w dev (no branch: derived from the worktree) ──"
   local repo
@@ -1878,6 +1964,7 @@ test_setup_skipped_by_default
 test_dev_commands_gated
 test_dev_guess_from_worktree
 test_branch_arg_from_git
+test_switch_from_git
 test_tmux_exact_match
 test_tmux_names
 test_gh_override
