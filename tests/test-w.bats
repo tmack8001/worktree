@@ -1197,7 +1197,7 @@ _cfg_dir_count() {
   _private_tmpdir
   _w_load_config "$TEST_DIR/nope.toml" anything || true
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$W_CFG_PROFILE" ]
 }
 
 @test "w-cfg: _w_load_config leaves no temp dir when no profile matches" {
@@ -1207,18 +1207,34 @@ _cfg_dir_count() {
   _w_load_config "$TEST_DIR/test.toml" be/x || rc=$?
   [ "$rc" -eq 1 ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$W_CFG_PROFILE" ]
 }
 
-@test "w-cfg: _w_cfg_cleanup removes the dir of a successful load" {
+@test "w-cfg: a successful _w_load_config creates no temp dir or file" {
   _private_tmpdir
-  printf '[profile.default]\nbranches = "*"\n' > "$TEST_DIR/test.toml"
+  printf '[profile.default]\nbranches = "*"\n\n[[profile.default.windows]]\nname = "a"\n' > "$TEST_DIR/test.toml"
   _w_load_config "$TEST_DIR/test.toml" anything
-  [ "$(_cfg_dir_count)" = "1" ]
-  [ "$(head -1 "$W_CFG_DIR/profile")" = "default" ]
-  _w_cfg_cleanup
+  [ "$W_CFG_PROFILE" = "default" ]
+  [ "$W_CFG_WIN_COUNT" = "1" ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "w-cfg: _w_load_config killed mid-parse leaves no temp dir" {
+  _private_tmpdir
+  # big enough that parsing takes far longer than the wait below
+  { printf '[profile.default]\nbranches = "*"\n'
+    awk 'BEGIN { for (i = 0; i < 50000; i++) print "k" i " = \"v\"" }'
+  } > "$TEST_DIR/big.toml"
+  sh -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml" \
+    </dev/null >/dev/null 2>&1 3>&- &
+  local pid=$!
+  sleep 1
+  kill -0 "$pid"                  # still parsing: the kill lands mid-parse
+  kill -TERM "$pid"
+  wait "$pid" || true
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
 }
 
 @test "w-cfg: w add, w dev and their error paths leave no temp dirs" {
@@ -1261,7 +1277,7 @@ _cfg_dir_count() {
   worktree add cfg-missing >/dev/null 2>&1
   [ -d "$WTS/cfg-missing" ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "${W_CFG_DIR:-}" ]
+  [ -z "${W_CFG_PROFILE:-}" ]
 }
 
 # ── TOML config parser ─────────────────────────────────────────────
@@ -1281,8 +1297,8 @@ branches = "*"
 run = "echo default"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/my-feature"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "frontend" ]
   [ "$setup" = "echo fe" ]
 }
@@ -1302,8 +1318,8 @@ branches = "*"
 run = "echo default"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "random-branch"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "default" ]
   [ "$setup" = "echo default" ]
 }
@@ -1323,7 +1339,7 @@ branches = "fe/*"
 run = "echo broad"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/auth-fix"
-  profile=$(head -1 "$W_CFG_DIR/profile")
+  profile=$W_CFG_PROFILE
   [ "$profile" = "specific" ]
 }
 
@@ -1356,8 +1372,8 @@ branches = "*"
 run = "echo hello"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "anything"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "default" ]
   [ "$setup" = "echo hello" ]
 }
@@ -1477,6 +1493,50 @@ TOML
   [ -d "$WTS/toml-e2e/extra_pkgs" ]       # profile extends
 }
 
+@test "_w_load_config: windows between other tables keep their own fields" {
+  cat > "$TEST_DIR/test.toml" <<'TOML'
+[profile.other]
+branches = "x/*"
+
+[[profile.other.windows]]
+name = "not-mine"
+
+[profile.default]
+branches = "*"
+session = "first"
+session = "second"
+
+[[profile.default.windows]]
+name = "one"
+run = "echo 1"
+
+[[profile.default.pre]]
+run = "echo pre"
+
+[[profile.default.windows]]
+dir = "sub"
+
+[[profile.other.windows]]
+name = "not-mine-either"
+
+[[profile.default.windows]]
+name = "three"
+TOML
+  _w_load_config "$TEST_DIR/test.toml" "anything"
+  [ "$W_CFG_PROFILE" = "default" ]
+  [ "$(_w_cfg_get session)" = "first" ]
+  [ -z "$(_w_cfg_get nope)" ]
+  [ "$W_CFG_WIN_COUNT" = "3" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 1)" = "one" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_CMDS" 1)" = "echo 1" ]
+  [ -z "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 2)" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_DIRS" 2)" = "sub" ]
+  [ -z "$(_w_cfg_nth "$W_CFG_WIN_CMDS" 2)" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 3)" = "three" ]
+  [ "$W_CFG_PRE" = "echo pre
+" ]
+}
+
 @test "_w_load_config: parses session override and window fields" {
   cat > "$TEST_DIR/test.toml" <<'TOML'
 [profile.frontend]
@@ -1494,9 +1554,9 @@ run = "make run-fe"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/thing"
   session=$(_w_cfg_get session)
-  win1=$(sed -n '1p' "$W_CFG_DIR/window_names")
-  win1_dir=$(sed -n '1p' "$W_CFG_DIR/window_dirs")
-  win2=$(sed -n '2p' "$W_CFG_DIR/window_names")
+  win1=$(_w_cfg_nth "$W_CFG_WIN_NAMES" 1)
+  win1_dir=$(_w_cfg_nth "$W_CFG_WIN_DIRS" 1)
+  win2=$(_w_cfg_nth "$W_CFG_WIN_NAMES" 2)
   [ "$session" = "my-session" ]
   [ "$win1" = "proxy" ]
   [ "$win1_dir" = "src/tsx" ]

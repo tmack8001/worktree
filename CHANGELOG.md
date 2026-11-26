@@ -15,9 +15,11 @@ its tag.
 - tmux sessions are matched by exact name (`=name`, `=name:`, `=name:window` targets). Before, `w rm foo` could kill
   and `w dev foo` could attach a session whose name only starts with the guessed name (e.g. `repo-foo-bar` when
   there was no `repo-foo`) (`w.sh`, `w.zsh`).
-- `w.sh`: `_w_load_config` no longer leaves `w-cfg.*` directories in `$TMPDIR`: none is created for a missing
-  config, it is removed when no profile matches, and `w add`, `w clone`, `w dev` and the dependency-dir lookup
-  remove it when done (no trap is set).
+- `w.sh`: `_w_load_config` no longer leaves `w-cfg.*` directories in `$TMPDIR`. It keeps the parsed config in shell
+  variables (`W_CFG_*`, newline-separated lists) instead of a `w-cfg.*` directory and `w-line.*` files, so it
+  creates no file at all and nothing is left behind even when it is interrupted mid-parse; no trap is set. Window
+  `name`, `dir` and `run` values are now kept verbatim, as in `w.zsh` (they went through `awk -v`, which
+  interpreted backslash escapes).
 - tmux session names are now the form tmux stores: tmux 3.4 replaces `.` and `:` with `_` and escapes `\`, `$`
   and control characters, so a repo or branch containing them (e.g. `fix/v1.2`) never matched its own session and
   `w dev` tried to create it again (`duplicate session`), put its windows nowhere and attached nothing, and
