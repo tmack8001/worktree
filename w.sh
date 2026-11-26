@@ -97,6 +97,53 @@ _w_worktree_branch() (
   esac
 )
 
+# Print the worktree that has branch $2 checked out, as git records it in
+# `git worktree list --porcelain` for repo $1 (never a path built from the
+# branch name: a worktree's directory need not match its branch). The path is
+# checked to be a worktree of the same repository with that branch checked
+# out, and printed physical (symlinks resolved).
+# Fails with 1 when no worktree has the branch, and with 2 (printing its path)
+# when only the main working tree has it.
+_w_branch_worktree_path() (
+  repo="$1" branch="$2" wt='' rc=0 top='' common=''
+  wt=$(git -C "$repo" worktree list --porcelain 2>/dev/null | W_REF="refs/heads/$branch" awk '
+    /^worktree / { wt = substr($0, 10); n++; next }
+    $0 == "branch " ENVIRON["W_REF"] { print wt; rc = (n == 1) ? 2 : 0; found = 1; exit }
+    END { if (!found) exit 1; exit rc }') || rc=$?
+  [ "$rc" -eq 0 ] || { printf '%s' "$wt"; return "$rc"; }
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(cd "$top" && pwd -P)" = "$(cd "$wt" && pwd -P)" ] || return 1
+  [ "$(_w_worktree_branch "$wt")" = "$branch" ] || return 1
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$(cd "$common" && pwd -P)" = "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ] || return 1
+  cd "$wt" && pwd -P
+)
+
+# ── tmux session names ─────────────────────────────────────────────
+#
+# tmux does not store a session name as given: it replaces '.' and ':' with
+# '_' and escapes '\', '$' and control characters (and, outside a UTF-8
+# locale, replaces non-ASCII characters). A target like `=repo-v1.2` then names
+# no session (worse, `.` and `:` split a target into window and pane), so the
+# name used for new-session and every later target must be one tmux stores
+# unchanged. _w_tmux_name makes it one: '.' and ':' become '_' as tmux does,
+# and so does every other byte that is not printable ASCII or is '\' or '$'.
+
+_w_tmux_name() (
+  printf '%s' "$1" | LC_ALL=C tr -c '\040-\043\045-\055\057-\071\073-\133\135-\176' '_'
+)
+
+# The tmux session for a worktree: the profile's `session` override if given,
+# else <repo basename>-<branch with / as ->, made tmux-safe.
+_w_session_name() (
+  repo="$1" branch="$2" override="${3:-}"
+  if [ -z "$override" ]; then
+    override="$(basename "$repo")-$(printf '%s' "$branch" | tr '/' '-')"
+  fi
+  _w_tmux_name "$override"
+)
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -252,25 +299,27 @@ _w_base_branch() (
 
 # ── TOML config parser (minimal, POSIX sh) ─────────────────────────
 #
-# Writes results to temp files since sh can't use global arrays.
-# Callers read: $W_CFG_DIR/profile, setup_cmds, pre_cmds,
-#               window_names, window_dirs, window_cmds
-# On success the caller owns $W_CFG_DIR and must call _w_cfg_cleanup when
-# done with it. On failure nothing is left behind and W_CFG_DIR is empty.
-# (No trap: this runs in the user's shell, whose own traps stay untouched.)
+# The parsed config is held in shell variables, never in files, so nothing is
+# created that an interrupted parse could leave behind and no trap is needed.
+# sh has no arrays, so a list is a string with one entry per line, each line
+# ending in a newline (a value is one config line, so it holds no newline):
+#   W_CFG_PROFILE     name of the matched profile
+#   W_CFG_KV          the profile's own key=value lines (session, dep_dirs, ...)
+#   W_CFG_SETUP       setup `run` commands
+#   W_CFG_PRE         pre `run` commands
+#   W_CFG_WIN_COUNT   number of windows
+#   W_CFG_WIN_NAMES   window names: line i is window i (may be empty)
+#   W_CFG_WIN_DIRS    window dirs, likewise
+#   W_CFG_WIN_CMDS    window `run` commands, likewise
+# A failed load leaves them all empty (W_CFG_WIN_COUNT 0). They are only set
+# inside the `worktree` subshell, so none reaches the user's shell.
 
 _w_load_config() {
   config_file="$1" branch="$2"
 
-  W_CFG_DIR=''
+  W_CFG_PROFILE='' W_CFG_KV='' W_CFG_SETUP='' W_CFG_PRE=''
+  W_CFG_WIN_COUNT=0 W_CFG_WIN_NAMES='' W_CFG_WIN_DIRS='' W_CFG_WIN_CMDS=''
   [ -f "$config_file" ] || return 1
-  W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX") || { W_CFG_DIR=''; return 1; }
-  : > "$W_CFG_DIR/profile"
-  : > "$W_CFG_DIR/setup_cmds"
-  : > "$W_CFG_DIR/pre_cmds"
-  : > "$W_CFG_DIR/window_names"
-  : > "$W_CFG_DIR/window_dirs"
-  : > "$W_CFG_DIR/window_cmds"
 
   # First pass: find matching profile
   line='' current_profile='' matched_profile="" p='' patterns=''
@@ -314,21 +363,28 @@ _w_load_config() {
     if grep -q '^\[profile\.default\]' "$config_file" 2>/dev/null; then
       matched_profile="default"
     else
-      _w_cfg_cleanup
       return 1
     fi
   fi
 
-  printf '%s\n' "$matched_profile" > "$W_CFG_DIR/profile"
-
-  # Second pass: parse matched profile
-  reading=0 in_window="" key='' val='' window_idx=0
+  # Second pass: parse matched profile. The fields of the window being read
+  # are kept in win_* and appended to the window lists when its table ends
+  # (at the next section header or at the end of the file).
+  reading=0 in_window="" key='' val='' win_open=0 win_name='' win_dir='' win_cmd=''
   current_profile=""
 
   while IFS= read -r line; do
     line="${line%%#*}"
     line=$(_w_trim "$line")
     [ -z "$line" ] && continue
+
+    case "$line" in
+      \[*)
+        if [ "$win_open" -eq 1 ]; then
+          _w_cfg_add_window "$win_name" "$win_dir" "$win_cmd"
+          win_open=0
+        fi ;;
+    esac
 
     case "$line" in
       \[\[profile.*\.setup\]\])
@@ -349,10 +405,7 @@ _w_load_config() {
         in_window=""; reading=0
         if [ "$current_profile" = "$matched_profile" ]; then
           reading=1; in_window="window"
-          window_idx=$((window_idx + 1))
-          printf '\n' >> "$W_CFG_DIR/window_names"
-          printf '\n' >> "$W_CFG_DIR/window_dirs"
-          printf '\n' >> "$W_CFG_DIR/window_cmds"
+          win_open=1 win_name='' win_dir='' win_cmd=''
         fi
         continue ;;
       \[profile.*)
@@ -379,51 +432,59 @@ _w_load_config() {
 
         case "$in_window" in
           setup)
-            [ "$key" = "run" ] && printf '%s\n' "$val" >> "$W_CFG_DIR/setup_cmds" ;;
+            [ "$key" = "run" ] && W_CFG_SETUP="$W_CFG_SETUP$val
+" ;;
           pre)
-            [ "$key" = "run" ] && printf '%s\n' "$val" >> "$W_CFG_DIR/pre_cmds" ;;
+            [ "$key" = "run" ] && W_CFG_PRE="$W_CFG_PRE$val
+" ;;
           window)
             case "$key" in
-              name) _w_file_set_line "$W_CFG_DIR/window_names" "$window_idx" "$val" ;;
-              dir)  _w_file_set_line "$W_CFG_DIR/window_dirs"  "$window_idx" "$val" ;;
-              run)  _w_file_set_line "$W_CFG_DIR/window_cmds"  "$window_idx" "$val" ;;
+              name) win_name="$val" ;;
+              dir)  win_dir="$val" ;;
+              run)  win_cmd="$val" ;;
             esac ;;
           *)
-            printf '%s=%s\n' "$key" "$val" >> "$W_CFG_DIR/profile" ;;
+            W_CFG_KV="$W_CFG_KV$key=$val
+" ;;
         esac
         ;;
     esac
   done < "$config_file"
 
+  [ "$win_open" -eq 1 ] && _w_cfg_add_window "$win_name" "$win_dir" "$win_cmd"
+
+  W_CFG_PROFILE="$matched_profile"
   return 0
 }
 
-# Remove the directory a successful _w_load_config left in $W_CFG_DIR.
-_w_cfg_cleanup() {
-  case "${W_CFG_DIR:-}" in
-    */w-cfg.?*) rm -rf "$W_CFG_DIR" ;;
-  esac
-  W_CFG_DIR=''
+# Append one window (name, dir, run command; each may be empty).
+_w_cfg_add_window() {
+  W_CFG_WIN_COUNT=$((W_CFG_WIN_COUNT + 1))
+  W_CFG_WIN_NAMES="$W_CFG_WIN_NAMES$1
+"
+  W_CFG_WIN_DIRS="$W_CFG_WIN_DIRS$2
+"
+  W_CFG_WIN_CMDS="$W_CFG_WIN_CMDS$3
+"
 }
 
-# Replace line N (1-based) in a file with a value
-_w_file_set_line() (
-  file="$1" n="$2" val="$3"
-  tmp=''
-  tmp=$(mktemp "${TMPDIR:-/tmp}/w-line.XXXXXX")
-  awk -v n="$n" -v v="$val" 'NR==n{print v; next} {print}' "$file" > "$tmp"
-  mv "$tmp" "$file"
+# Read a key from the matched profile (the first value given for it).
+_w_cfg_get() (
+  kv=''
+  while IFS= read -r kv; do
+    case "$kv" in
+      "$1="*) printf '%s\n' "${kv#*=}"; return 0 ;;
+    esac
+  done <<EOF
+${W_CFG_KV:-}
+EOF
+  return 0
 )
 
-# Read a key from the profile key=value store
-_w_cfg_get() {
-  grep "^${1}=" "$W_CFG_DIR/profile" 2>/dev/null | head -1 | cut -d= -f2-
-}
-
-# Count non-empty lines in a file
-_w_file_count() {
-  grep -c . "$1" 2>/dev/null || printf '0'
-}
+# Print line $2 (1-based) of the newline-separated list $1.
+_w_cfg_nth() (
+  printf '%s' "$1" | sed -n "${2}p"
+)
 
 # ── Repo-command opt-in ────────────────────────────────────────────
 #
@@ -438,16 +499,22 @@ _w_repo_commands_allowed() {
   [ "${WORKTREE_ALLOW_REPO_COMMANDS:-}" = "1" ]
 }
 
-# _w_repo_commands_skipped <kind> <file-of-commands>
+# _w_repo_commands_skipped <kind> <newline-separated commands>
 _w_repo_commands_skipped() (
-  kind="$1" file="$2" n='' cmd=''
-  n=$(grep -c . "$file" 2>/dev/null) || n=0
+  kind="$1" list="$2" n=0 cmd=''
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] && n=$((n + 1))
+  done <<EOF
+$list
+EOF
   [ "$n" -gt 0 ] || return 0
   echo "  ⚠️  Not running $n $kind command(s) from .worktree.toml:"
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     echo "      $cmd"
-  done < "$file"
+  done <<EOF
+$list
+EOF
   echo "     Repo commands are off by default. Review them, then re-run with"
   echo "     WORKTREE_ALLOW_REPO_COMMANDS=1 to allow them."
 )
@@ -460,12 +527,10 @@ _w_run_setup() {
 
   _w_load_config "$config_file" "$branch" || return 0
 
-  profile_name=''
-  profile_name=$(head -1 "$W_CFG_DIR/profile")
-  echo "📋 Matched profile: $profile_name"
+  echo "📋 Matched profile: $W_CFG_PROFILE"
 
   if ! _w_repo_commands_allowed; then
-    _w_repo_commands_skipped setup "$W_CFG_DIR/setup_cmds"
+    _w_repo_commands_skipped setup "$W_CFG_SETUP"
     return 0
   fi
 
@@ -474,7 +539,9 @@ _w_run_setup() {
     [ -z "$cmd" ] && continue
     echo "  🔧 $cmd"
     (cd "$dest" && eval "$cmd")
-  done < "$W_CFG_DIR/setup_cmds"
+  done <<EOF
+$W_CFG_SETUP
+EOF
 }
 
 # ── Dependency bootstrap ───────────────────────────────────────────
@@ -559,7 +626,6 @@ _w_resolve_dep_dirs() (
   if [ -f "$cfg" ] && _w_load_config "$cfg" "$branch" 2>/dev/null; then
     prof=$(_w_cfg_get dep_dirs)
     [ -n "$prof" ] && dirs="$dirs $prof"
-    _w_cfg_cleanup
   fi
 
   # dedupe, preserving first-seen order (no case-pattern expansion)
@@ -647,24 +713,16 @@ _w_dev() (
     return 1
   }
 
-  session_override=''
-  session_override=$(_w_cfg_get session)
-  repo_base=''
-  repo_base=$(basename "$repo")
-  branch_safe=''
-  branch_safe=$(printf '%s' "$branch" | tr '/' '-')
-  session_name="${session_override:-${repo_base}-${branch_safe}}"
+  session_name=''
+  session_name=$(_w_session_name "$repo" "$branch" "$(_w_cfg_get session)")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
-    _w_cfg_cleanup
     echo "🔌 Reattaching to $session_name"
     tmux attach-session -t "=$session_name"
     return 0
   fi
 
-  profile_name=''
-  profile_name=$(head -1 "$W_CFG_DIR/profile")
-  echo "🚀 Starting dev session: $session_name (profile: $profile_name)"
+  echo "🚀 Starting dev session: $session_name (profile: $W_CFG_PROFILE)"
 
   # Pre-launch commands (and window commands below) only run on opt-in
   allow=0
@@ -677,26 +735,25 @@ _w_dev() (
       echo "  ⚙️  $cmd"
       if ! (cd "$dest" && eval "$cmd"); then
         echo "  ❌ Failed — aborting session"
-        _w_cfg_cleanup
         return 1
       fi
-    done < "$W_CFG_DIR/pre_cmds"
+    done <<EOF
+$W_CFG_PRE
+EOF
   else
-    _w_repo_commands_skipped pre "$W_CFG_DIR/pre_cmds"
-    _w_repo_commands_skipped window "$W_CFG_DIR/window_cmds"
+    _w_repo_commands_skipped pre "$W_CFG_PRE"
+    _w_repo_commands_skipped window "$W_CFG_WIN_CMDS"
   fi
 
   # Window 0: shell
   tmux new-session -d -s "$session_name" -c "$dest" -n "shell"
 
-  total_windows=''
-  total_windows=$(wc -l < "$W_CFG_DIR/window_names" | tr -d ' ')
   i=1
-  while [ "$i" -le "$total_windows" ]; do
+  while [ "$i" -le "$W_CFG_WIN_COUNT" ]; do
     wname='' wdir='' wcmd=''
-    wname=$(sed -n "${i}p" "$W_CFG_DIR/window_names")
-    wdir=$(sed -n "${i}p" "$W_CFG_DIR/window_dirs")
-    wcmd=$(sed -n "${i}p" "$W_CFG_DIR/window_cmds")
+    wname=$(_w_cfg_nth "$W_CFG_WIN_NAMES" "$i")
+    wdir=$(_w_cfg_nth "$W_CFG_WIN_DIRS" "$i")
+    wcmd=$(_w_cfg_nth "$W_CFG_WIN_CMDS" "$i")
     wname="${wname:-win${i}}"
 
     case "$wdir" in
@@ -713,7 +770,6 @@ _w_dev() (
     i=$((i + 1))
   done
 
-  _w_cfg_cleanup
   tmux select-window -t "=${session_name}:shell"
   tmux attach-session -t "=$session_name"
 )
@@ -727,7 +783,7 @@ _w_dev() (
 # here. The positional parameters are this function's only scratch storage,
 # so it sets no variables either. _w_repo_info, _w_load_config and
 # _w_run_setup stay brace functions because callers read what they set
-# (W_MAIN_REPO, W_WORKTREES_DIR, W_CFG_DIR); they only ever run inside that
+# (W_MAIN_REPO, W_WORKTREES_DIR, the W_CFG_* config); they only ever run inside that
 # subshell (or a test).
 
 worktree() {
@@ -871,7 +927,6 @@ EOF
       _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
       if [ -f "$dest/.worktree.toml" ]; then
         _w_run_setup "$dest" "$bare_dir" "$branch"
-        _w_cfg_cleanup
       fi
     fi
   fi
@@ -991,10 +1046,7 @@ EOF
 
   if [ "$wt_ok" -eq 0 ] && [ -f "$repo/.worktree.toml" ]; then
     _w_run_setup "$dest" "$repo" "$branch"
-    win_count=''
-    [ -n "${W_CFG_DIR:-}" ] && win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
-    _w_cfg_cleanup
-    if [ "${win_count:-0}" -gt 0 ]; then
+    if [ "${W_CFG_WIN_COUNT:-0}" -gt 0 ]; then
       echo ""
       echo "Run 'worktree dev' to launch tmux session."
     fi
@@ -1041,7 +1093,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
@@ -1081,7 +1141,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
@@ -1097,10 +1165,8 @@ EOF
     return 1
   fi
 
-  repo_base='' branch_safe='' session_guess=''
-  repo_base=$(basename "$repo")
-  branch_safe=$(printf '%s' "$branch" | tr '/' '-')
-  session_guess="${repo_base}-${branch_safe}"
+  session_guess=''
+  session_guess=$(_w_session_name "$repo" "$branch")
   tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).

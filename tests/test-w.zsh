@@ -437,6 +437,78 @@ test_rm_guess_from_worktree() {
   )
 }
 
+# An explicit branch is looked up in `git worktree list`, never mapped to
+# <worktrees>/<branch>.
+test_branch_arg_from_git() {
+  echo "── w rm / w dev <branch>: worktree path from git ──"
+  local repo
+  repo=$(setup_repo "barg")
+  local wts="$TEST_ROOT/barg-worktrees"
+
+  (
+    cd "$repo"
+    git -C "$repo" worktree add -q -b feature/deep "$wts/flat-dir"
+    local output rc
+    output=$(echo "feature/deep" | w rm feature/deep 2>&1); rc=$?
+    assert_exit_code "rm <slash branch> in a differently named dir succeeds" "0" "$rc"
+    assert_dir_not_exists "rm removed the dir git has the branch in" "$wts/flat-dir"
+    git -C "$repo" show-ref --verify --quiet refs/heads/feature/deep \
+      && fail "rm deleted feature/deep" || pass "rm deleted feature/deep"
+
+    # $wts/foo holds branch bar; branch foo lives in $wts/other
+    git -C "$repo" worktree add -q -b bar "$wts/foo"
+    git -C "$repo" worktree add -q -b foo "$wts/other"
+    output=$(echo "foo" | w rm foo 2>&1); rc=$?
+    assert_exit_code "rm foo succeeds" "0" "$rc"
+    assert_eq "rm foo leaves the dir named foo (branch bar)" "refs/heads/bar" \
+      "$(git -C "$wts/foo" symbolic-ref HEAD 2>/dev/null)"
+    assert_dir_not_exists "rm foo removes the worktree git has foo in" "$wts/other"
+
+    git -C "$repo" branch lonely
+    mkdir -p "$wts/lonely"
+    output=$(echo "lonely" | w rm lonely 2>&1); rc=$?
+    assert_exit_code "rm of a branch with no worktree fails" "1" "$rc"
+    assert_contains "rm says the branch has no worktree" "$output" "No worktree has branch 'lonely' checked out"
+    [[ "$output" != *"Type the name"* ]] && pass "rm of a branch with no worktree does not prompt" \
+      || fail "rm of a branch with no worktree prompted"
+    assert_dir_exists "rm of a branch with no worktree keeps the dir" "$wts/lonely"
+
+    output=$(echo "main" | w rm main 2>&1); rc=$?
+    assert_exit_code "rm of the main working tree's branch fails" "1" "$rc"
+    assert_contains "rm names the main working tree" "$output" "checked out in the main working tree ($repo)"
+    git -C "$repo" show-ref --verify --quiet refs/heads/main \
+      && pass "rm keeps main" || fail "rm deleted main"
+  )
+
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+TOML
+  local bin="$TEST_ROOT/barg-bin"
+  _zt_fake_tmux "$bin"
+  (
+    cd "$repo"
+    git -C "$repo" worktree add -q -b feature/devdeep "$wts/devflat"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev feature/devdeep 2>&1); rc=$?
+    assert_exit_code "dev <slash branch> in a differently named dir succeeds" "0" "$rc"
+    if grep -q -- "^new-session -d -s barg-feature-devdeep -c $wts/devflat " "$bin/tmux.log"; then
+      pass "dev starts in the dir git has the branch in"
+    else
+      fail "dev did not start in $wts/devflat"
+    fi
+
+    : > "$bin/tmux.log"
+    git -C "$repo" branch devlonely
+    mkdir -p "$wts/devlonely"
+    output=$(PATH="$bin:$PATH" w dev devlonely 2>&1); rc=$?
+    assert_exit_code "dev of a branch with no worktree fails" "1" "$rc"
+    assert_contains "dev says the branch has no worktree" "$output" "No worktree has branch 'devlonely' checked out"
+    grep -q 'new-session' "$bin/tmux.log" && fail "dev started a session without a worktree" \
+      || pass "dev starts no session without a worktree"
+  )
+}
+
 test_dev_guess_from_worktree() {
   echo "── w dev (no branch: derived from the worktree) ──"
   local repo
@@ -1601,6 +1673,67 @@ TOML
   "$REAL_TMUX" kill-session -t "=tx-foo-bar" >/dev/null 2>&1
 }
 
+# ── tmux session names tmux would rewrite ─────────────────────────
+#
+# tmux stores a session name with '.' and ':' as '_' (and escapes '\\', '$'
+# and control characters), so worktree must use that stored form everywhere.
+
+test_tmux_names() {
+  echo "── tmux: session names tmux would rewrite ──"
+  assert_eq "_w_tmux_name maps . and : to _" "my_re_po-fix/v1_2" "$(_w_tmux_name 'my.re:po-fix/v1.2')"
+  assert_eq "_w_tmux_name maps \\ \$ tab and non-ASCII bytes to _" "a_b_c_d__ e" \
+    "$(_w_tmux_name $'a\\b$c\tdé e')"
+  assert_eq "_w_tmux_name keeps a plain name" "plain-name_09 ok" "$(_w_tmux_name 'plain-name_09 ok')"
+  assert_eq "_w_session_name default" "my_repo-fix-v1_2" "$(_w_session_name /x/my.repo fix/v1.2)"
+  assert_eq "_w_session_name override made tmux-safe" "my_session_1" \
+    "$(_w_session_name /x/repo b 'my.session:1')"
+
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+
+  local r="$TEST_ROOT/my.re:po" s="my_re_po-fix-v1_2"
+  setup_repo "tn" >/dev/null
+  git clone -q "$TEST_ROOT/tn-bare.git" "$r" 2>/dev/null
+  cat > "$r/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "server"
+TOML
+  local bin="$TEST_ROOT/tn-bin"
+  _zt_attach_logging_tmux "$bin"
+  (
+    cd "$r"
+    w add fix/v1.2 >/dev/null 2>&1
+    assert_dir_exists "worktree in a repo with . and :" "$r-worktrees/fix/v1.2"
+    cd "$r-worktrees/fix/v1.2"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with . and : in the name succeeds" "0" "$rc"
+    assert_contains "dev names the session as tmux stores it" "$output" "Starting dev session: $s "
+    assert_eq "dev attaches the session it created" "$s" "$(<"$bin/attach.log")"
+    assert_eq "dev puts its windows in that session" "shell server " \
+      "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 2>/dev/null | tr '\n' ' ')"
+
+    : > "$bin/attach.log"
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "second dev succeeds" "0" "$rc"
+    assert_contains "second dev reattaches" "$output" "Reattaching to $s"
+    assert_eq "second dev attaches the same session" "$s" "$(<"$bin/attach.log")"
+    assert_eq "no second session is created" "1" \
+      "$("$REAL_TMUX" list-sessions -F x 2>/dev/null | wc -l | tr -d ' ')"
+
+    cd "$r"
+    echo "fix/v1.2" | w rm fix/v1.2 >/dev/null 2>&1
+    assert_dir_not_exists "rm removed the worktree" "$r-worktrees/fix/v1.2"
+    _zt_tmux_has "$s" && fail "rm left the session $s" || pass "rm kills the session tmux stored"
+  )
+  "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
+}
+
 # ── gh command override ───────────────────────────────────────────
 
 _zt_fake_gh() {
@@ -1739,7 +1872,9 @@ test_dep_dirs_toml
 test_setup_skipped_by_default
 test_dev_commands_gated
 test_dev_guess_from_worktree
+test_branch_arg_from_git
 test_tmux_exact_match
+test_tmux_names
 test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────

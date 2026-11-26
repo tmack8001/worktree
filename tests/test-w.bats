@@ -441,6 +441,79 @@ TOML
   [ "$status" -ne 0 ]
 }
 
+# An explicit branch is looked up in `git worktree list`, never mapped to
+# <worktrees>/<branch>.
+
+@test "w rm <branch>: removes the worktree git has the branch in, whatever its directory" {
+  cd "$REPO"
+  git -C "$REPO" worktree add -q -b feature/deep "$WTS/flat-dir"
+  run bash -c "echo feature/deep | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm feature/deep 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/flat-dir" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/feature/deep
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm <branch>: never removes a worktree only because its directory has the branch's name" {
+  cd "$REPO"
+  # $WTS/foo holds branch bar; branch foo lives in $WTS/other
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" worktree add -q -b foo "$WTS/other"
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/foo" ]
+  [ "$(git -C "$WTS/foo" symbolic-ref HEAD)" = "refs/heads/bar" ]
+  [ ! -d "$WTS/other" ]
+  run git -C "$REPO" show-ref --verify --quiet refs/heads/foo
+  [ "$status" -ne 0 ]
+}
+
+@test "w rm <branch>: a branch with no worktree fails closed without prompting" {
+  cd "$REPO"
+  git -C "$REPO" branch lonely
+  mkdir -p "$WTS/lonely"
+  run bash -c "echo lonely | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm lonely 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'lonely' checked out"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  [ -d "$WTS/lonely" ]
+  git -C "$REPO" show-ref --verify --quiet refs/heads/lonely
+}
+
+@test "w rm <branch>: the branch of the main working tree is refused" {
+  cd "$REPO"
+  run bash -c "echo main | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm main 2>&1)"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"checked out in the main working tree ($REPO)"* ]]
+  [[ "$output" != *"Type the name"* ]]
+  git -C "$REPO" show-ref --verify --quiet refs/heads/main
+}
+
+@test "w dev <branch>: starts the session in the worktree git has the slash branch in" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" worktree add -q -b feature/devdeep "$WTS/devflat"
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$REPO"
+  run worktree dev feature/devdeep
+  [ "$status" -eq 0 ]
+  grep -q -- "^new-session -d -s repo-feature-devdeep -c $WTS/devflat " "$TEST_DIR/tmux.log"
+}
+
+@test "w dev <branch>: a branch with no worktree fails closed" {
+  _write_dev_toml
+  _fake_tmux
+  git -C "$REPO" branch devlonely
+  mkdir -p "$WTS/devlonely"
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$REPO"
+  run worktree dev devlonely
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'devlonely' checked out"* ]]
+  run grep -c 'new-session' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
+}
+
 @test "w dev: without a branch, uses the slash branch checked out here" {
   _write_dev_toml
   _fake_tmux
@@ -586,6 +659,54 @@ FAKE
   [ "$status" -eq 0 ]
   [[ "$output" == *"Reattaching to repo-foo"* ]]
   [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
+}
+
+# ── tmux session names tmux would rewrite ──────────────────────────
+#
+# tmux stores a session name with '.' and ':' as '_' (and escapes '\\', '$'
+# and control characters), so worktree must use that stored form everywhere.
+
+@test "tmux names: _w_tmux_name maps what tmux rewrites or escapes to _" {
+  [ "$(_w_tmux_name 'my.re:po-fix/v1.2')" = "my_re_po-fix/v1_2" ]
+  [ "$(_w_tmux_name "$(printf 'a\\b$c\tdé e')")" = "a_b_c_d__ e" ]
+  [ "$(_w_tmux_name 'plain-name_09 ok')" = "plain-name_09 ok" ]
+}
+
+@test "tmux names: the session override is made tmux-safe too" {
+  [ "$(_w_session_name /x/my.repo fix/v1.2)" = "my_repo-fix-v1_2" ]
+  [ "$(_w_session_name /x/repo b 'my.session:1')" = "my_session_1" ]
+}
+
+@test "tmux names: w dev and w rm work with . and : in the repo and . in the branch" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  local r="$TEST_DIR/my.re:po" s="my_re_po-fix-v1_2"
+  git clone -q "$TEST_DIR/remote.git" "$r"
+  REPO="$r" _write_dev_toml
+  cd "$r"
+  worktree add fix/v1.2 >/dev/null 2>&1
+  [ -d "$r-worktrees/fix/v1.2" ]
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$r-worktrees/fix/v1.2"
+
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+  [[ "$output" == *"Starting dev session: $s "* ]]
+
+  # the second run finds the same session instead of creating another
+  : > "$TEST_DIR/attach.log"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to $s"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+
+  run bash -c "echo fix/v1.2 | (source '$REPO_ROOT/w.sh' && cd '$r' && worktree rm fix/v1.2 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has "$s"
+  [ "$status" -ne 0 ]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -1076,7 +1197,7 @@ _cfg_dir_count() {
   _private_tmpdir
   _w_load_config "$TEST_DIR/nope.toml" anything || true
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$W_CFG_PROFILE" ]
 }
 
 @test "w-cfg: _w_load_config leaves no temp dir when no profile matches" {
@@ -1086,18 +1207,34 @@ _cfg_dir_count() {
   _w_load_config "$TEST_DIR/test.toml" be/x || rc=$?
   [ "$rc" -eq 1 ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$W_CFG_PROFILE" ]
 }
 
-@test "w-cfg: _w_cfg_cleanup removes the dir of a successful load" {
+@test "w-cfg: a successful _w_load_config creates no temp dir or file" {
   _private_tmpdir
-  printf '[profile.default]\nbranches = "*"\n' > "$TEST_DIR/test.toml"
+  printf '[profile.default]\nbranches = "*"\n\n[[profile.default.windows]]\nname = "a"\n' > "$TEST_DIR/test.toml"
   _w_load_config "$TEST_DIR/test.toml" anything
-  [ "$(_cfg_dir_count)" = "1" ]
-  [ "$(head -1 "$W_CFG_DIR/profile")" = "default" ]
-  _w_cfg_cleanup
+  [ "$W_CFG_PROFILE" = "default" ]
+  [ "$W_CFG_WIN_COUNT" = "1" ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "$W_CFG_DIR" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "w-cfg: _w_load_config killed mid-parse leaves no temp dir" {
+  _private_tmpdir
+  # big enough that parsing takes far longer than the wait below
+  { printf '[profile.default]\nbranches = "*"\n'
+    awk 'BEGIN { for (i = 0; i < 50000; i++) print "k" i " = \"v\"" }'
+  } > "$TEST_DIR/big.toml"
+  sh -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml" \
+    </dev/null >/dev/null 2>&1 3>&- &
+  local pid=$!
+  sleep 1
+  kill -0 "$pid"                  # still parsing: the kill lands mid-parse
+  kill -TERM "$pid"
+  wait "$pid" || true
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
 }
 
 @test "w-cfg: w add, w dev and their error paths leave no temp dirs" {
@@ -1140,7 +1277,7 @@ _cfg_dir_count() {
   worktree add cfg-missing >/dev/null 2>&1
   [ -d "$WTS/cfg-missing" ]
   [ "$(_cfg_dir_count)" = "0" ]
-  [ -z "${W_CFG_DIR:-}" ]
+  [ -z "${W_CFG_PROFILE:-}" ]
 }
 
 # ── TOML config parser ─────────────────────────────────────────────
@@ -1160,8 +1297,8 @@ branches = "*"
 run = "echo default"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/my-feature"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "frontend" ]
   [ "$setup" = "echo fe" ]
 }
@@ -1181,8 +1318,8 @@ branches = "*"
 run = "echo default"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "random-branch"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "default" ]
   [ "$setup" = "echo default" ]
 }
@@ -1202,7 +1339,7 @@ branches = "fe/*"
 run = "echo broad"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/auth-fix"
-  profile=$(head -1 "$W_CFG_DIR/profile")
+  profile=$W_CFG_PROFILE
   [ "$profile" = "specific" ]
 }
 
@@ -1235,8 +1372,8 @@ branches = "*"
 run = "echo hello"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "anything"
-  profile=$(head -1 "$W_CFG_DIR/profile")
-  setup=$(head -1 "$W_CFG_DIR/setup_cmds")
+  profile=$W_CFG_PROFILE
+  setup=$(_w_cfg_nth "$W_CFG_SETUP" 1)
   [ "$profile" = "default" ]
   [ "$setup" = "echo hello" ]
 }
@@ -1356,6 +1493,50 @@ TOML
   [ -d "$WTS/toml-e2e/extra_pkgs" ]       # profile extends
 }
 
+@test "_w_load_config: windows between other tables keep their own fields" {
+  cat > "$TEST_DIR/test.toml" <<'TOML'
+[profile.other]
+branches = "x/*"
+
+[[profile.other.windows]]
+name = "not-mine"
+
+[profile.default]
+branches = "*"
+session = "first"
+session = "second"
+
+[[profile.default.windows]]
+name = "one"
+run = "echo 1"
+
+[[profile.default.pre]]
+run = "echo pre"
+
+[[profile.default.windows]]
+dir = "sub"
+
+[[profile.other.windows]]
+name = "not-mine-either"
+
+[[profile.default.windows]]
+name = "three"
+TOML
+  _w_load_config "$TEST_DIR/test.toml" "anything"
+  [ "$W_CFG_PROFILE" = "default" ]
+  [ "$(_w_cfg_get session)" = "first" ]
+  [ -z "$(_w_cfg_get nope)" ]
+  [ "$W_CFG_WIN_COUNT" = "3" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 1)" = "one" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_CMDS" 1)" = "echo 1" ]
+  [ -z "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 2)" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_DIRS" 2)" = "sub" ]
+  [ -z "$(_w_cfg_nth "$W_CFG_WIN_CMDS" 2)" ]
+  [ "$(_w_cfg_nth "$W_CFG_WIN_NAMES" 3)" = "three" ]
+  [ "$W_CFG_PRE" = "echo pre
+" ]
+}
+
 @test "_w_load_config: parses session override and window fields" {
   cat > "$TEST_DIR/test.toml" <<'TOML'
 [profile.frontend]
@@ -1373,9 +1554,9 @@ run = "make run-fe"
 TOML
   _w_load_config "$TEST_DIR/test.toml" "fe/thing"
   session=$(_w_cfg_get session)
-  win1=$(sed -n '1p' "$W_CFG_DIR/window_names")
-  win1_dir=$(sed -n '1p' "$W_CFG_DIR/window_dirs")
-  win2=$(sed -n '2p' "$W_CFG_DIR/window_names")
+  win1=$(_w_cfg_nth "$W_CFG_WIN_NAMES" 1)
+  win1_dir=$(_w_cfg_nth "$W_CFG_WIN_DIRS" 1)
+  win2=$(_w_cfg_nth "$W_CFG_WIN_NAMES" 2)
   [ "$session" = "my-session" ]
   [ "$win1" = "proxy" ]
   [ "$win1_dir" = "src/tsx" ]

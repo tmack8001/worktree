@@ -82,6 +82,52 @@ _w_worktree_branch() {
   printf '%s' "${ref#refs/heads/}"
 }
 
+# Print the worktree that has branch $2 checked out, as git records it in
+# `git worktree list --porcelain` for repo $1 (never a path built from the
+# branch name: a worktree's directory need not match its branch). The path is
+# checked to be a worktree of the same repository with that branch checked
+# out, and printed physical (symlinks resolved).
+# Fails with 1 when no worktree has the branch, and with 2 (printing its path)
+# when only the main working tree has it.
+_w_branch_worktree_path() {
+  local repo="$1" branch="$2" wt top common rc=0
+  wt=$(git -C "$repo" worktree list --porcelain 2>/dev/null | W_REF="refs/heads/$branch" awk '
+    /^worktree / { wt = substr($0, 10); n++; next }
+    $0 == "branch " ENVIRON["W_REF"] { print wt; rc = (n == 1) ? 2 : 0; found = 1; exit }
+    END { if (!found) exit 1; exit rc }') || rc=$?
+  (( rc == 0 )) || { printf '%s' "$wt"; return $rc; }
+  [[ -n "$wt" && -d "$wt" ]] || return 1
+  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [[ "$(cd "$top" && pwd -P)" == "$(cd "$wt" && pwd -P)" ]] || return 1
+  [[ "$(_w_worktree_branch "$wt")" == "$branch" ]] || return 1
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [[ "$(cd "$common" && pwd -P)" == "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ]] || return 1
+  (cd "$wt" && pwd -P)
+}
+
+# ── tmux session names ─────────────────────────────────────────────
+#
+# tmux does not store a session name as given: it replaces '.' and ':' with
+# '_' and escapes '\', '$' and control characters (and, outside a UTF-8
+# locale, replaces non-ASCII characters). A target like `=repo-v1.2` then names
+# no session (worse, `.` and `:` split a target into window and pane), so the
+# name used for new-session and every later target must be one tmux stores
+# unchanged. _w_tmux_name makes it one: '.' and ':' become '_' as tmux does,
+# and so does every other byte that is not printable ASCII or is '\' or '$'.
+# (tr on bytes, as in w.sh, so both variants give the same name.)
+
+_w_tmux_name() {
+  printf '%s' "$1" | LC_ALL=C tr -c '\040-\043\045-\055\057-\071\073-\133\135-\176' '_'
+}
+
+# The tmux session for a worktree: the profile's `session` override if given,
+# else <repo basename>-<branch with / as ->, made tmux-safe.
+_w_session_name() {
+  local repo="$1" branch="$2" name="${3:-}"
+  [[ -n "$name" ]] || name="${repo:t}-${branch//\//-}"
+  _w_tmux_name "$name"
+}
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -537,7 +583,8 @@ _w_dev() {
     return 1
   }
 
-  local session_name="${W_PROFILE[session]:-$(basename "$repo")-${branch//\//-}}"
+  local session_name
+  session_name=$(_w_session_name "$repo" "$branch" "${W_PROFILE[session]:-}")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
@@ -950,7 +997,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
   if [[ ! -d "$dest" ]]; then
     echo "No worktree at $dest"
@@ -990,7 +1045,15 @@ EOF
       return 1
     }
   else
-    dest="$wtdir/$branch"
+    # The worktree git has this branch checked out in, wherever it is.
+    dest=$(_w_branch_worktree_path "$repo" "$branch")
+    case $? in
+      0) ;;
+      2) echo "Branch '$branch' is checked out in the main working tree ($dest), not in a worktree"
+         return 1 ;;
+      *) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+         return 1 ;;
+    esac
   fi
 
   if [[ ! -d "$dest" ]]; then
@@ -1008,7 +1071,8 @@ EOF
   fi
 
   # Kill tmux session if one exists for this worktree
-  local session_guess="${repo:t}-${branch//\//-}"
+  local session_guess
+  session_guess=$(_w_session_name "$repo" "$branch")
   tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).
