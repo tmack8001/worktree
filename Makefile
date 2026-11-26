@@ -4,7 +4,7 @@ BATS       := bats
 SHELLCHECK := shellcheck
 VHS        := vhs
 
-TESTS      := tests/test-w.bats
+TESTS      := tests/test-w.bats tests/test-install.bats
 ZSH_TESTS  := tests/test-w.zsh
 DEMO_TAPE  := demo/demo.tape
 DEMO_GIF   := demo/demo.gif

@@ -93,7 +93,16 @@ _w_resolve_branch_url() {
 #   https://github.com/owner/repo/pull/123
 #   https://github.com/owner/repo/pulls/123
 #   With or without trailing slash
-# Returns 0 and prints the branch name on success, returns 1 if not a PR URL.
+# Returns 0 and prints the branch name on success, 1 if not a PR URL, and
+# 2 if it is a PR URL but gh is missing or could not resolve it.
+#
+# gh is invoked as "${GITHUB_CMD:-${GH_CMD:-gh}}" (GITHUB_CMD, else GH_CMD,
+# else plain gh; an empty value counts as unset). The value is a command line
+# and is split into words, so GITHUB_CMD="ghid --some-flag" works.
+_w_gh_cmd() {
+  print -rn -- "${GITHUB_CMD:-${GH_CMD:-gh}}"
+}
+
 _w_resolve_pr_url() {
   local input="$1"
 
@@ -101,18 +110,30 @@ _w_resolve_pr_url() {
   if [[ "$input" =~ '^https?://github\.com/[^/]+/[^/]+/pulls?/[0-9]+/?$' ]]; then
     # Normalize: strip trailing slash, fix /pulls/ to /pull/
     local url="${input%/}"
-    url="${url/\/pulls\//\/pull\/}"
+    url="${url/\/pulls\///pull/}"
 
-    if ! command -v gh &>/dev/null; then
-      echo "gh CLI not installed — install with: brew install gh" >&2
-      return 1
+    # owner/repo from the URL, passed as an explicit -R so an
+    # identity-selecting wrapper (GITHUB_CMD / GH_CMD) is deterministic.
+    local slug="${url#*://github.com/}"
+    local owner="${slug%%/*}"
+    slug="${slug#*/}"
+    local name="${slug%%/*}"
+
+    # The gh command line: GITHUB_CMD, else GH_CMD, else gh (split on spaces)
+    local gh_cmd
+    gh_cmd=$(_w_gh_cmd)
+    local -a gh_argv
+    gh_argv=(${=gh_cmd})
+    if (( ${#gh_argv} == 0 )) || ! command -v "${gh_argv[1]}" &>/dev/null; then
+      echo "gh CLI not installed — '${gh_argv[1]:-gh}' not found. Install gh (brew install gh) or set GITHUB_CMD / GH_CMD" >&2
+      return 2
     fi
 
     local branch
-    branch=$(gh pr view "$url" --json headRefName --jq '.headRefName' 2>/dev/null)
+    branch=$("${gh_argv[@]}" pr view "$url" -R "$owner/$name" --json headRefName --jq '.headRefName' 2>/dev/null)
     if [[ -z "$branch" ]]; then
       echo "Failed to resolve PR URL: $url" >&2
-      return 1
+      return 2
     fi
 
     echo "$branch"
@@ -306,6 +327,34 @@ _w_load_config() {
   return 0
 }
 
+# ── Repo-command opt-in ────────────────────────────────────────────
+#
+# .worktree.toml lives in the repository, so a committed config can carry
+# commands written by anyone who can push to it. The setup, pre and window
+# `run` commands are therefore NOT executed unless the user opts in by setting
+# WORKTREE_ALLOW_REPO_COMMANDS=1 (exactly "1"). Without it, the commands are
+# listed so they can be reviewed, and everything else (worktree creation,
+# dependency bootstrap, tmux windows) still happens.
+
+_w_repo_commands_allowed() {
+  [[ "${WORKTREE_ALLOW_REPO_COMMANDS:-}" == "1" ]]
+}
+
+# _w_repo_commands_skipped <kind> <cmd>...
+_w_repo_commands_skipped() {
+  local kind="$1"; shift
+  local -a cmds
+  cmds=("${(@)@:#}")
+  (( ${#cmds} )) || return 0
+  echo "  ⚠️  Not running ${#cmds} $kind command(s) from .worktree.toml:"
+  local cmd
+  for cmd in "${cmds[@]}"; do
+    echo "      $cmd"
+  done
+  echo "     Repo commands are off by default. Review them, then re-run with"
+  echo "     WORKTREE_ALLOW_REPO_COMMANDS=1 to allow them."
+}
+
 # ── Scaffolding & tmux ─────────────────────────────────────────────
 
 _w_run_setup() {
@@ -315,6 +364,11 @@ _w_run_setup() {
   _w_load_config "$config_file" "$branch" || return 0
 
   echo "📋 Matched profile: ${W_PROFILE[name]}"
+
+  if ! _w_repo_commands_allowed; then
+    _w_repo_commands_skipped setup "${W_SETUP_CMDS[@]}"
+    return 0
+  fi
 
   local cmd
   for cmd in "${W_SETUP_CMDS[@]}"; do
@@ -475,16 +529,24 @@ _w_dev() {
 
   echo "🚀 Starting dev session: $session_name (profile: ${W_PROFILE[name]})"
 
-  # Pre-launch commands
+  # Pre-launch commands (and window commands below) only run on opt-in
+  local allow=0
+  _w_repo_commands_allowed && allow=1
+
   local cmd
-  for cmd in "${W_PRE_CMDS[@]}"; do
-    [[ -z "$cmd" ]] && continue
-    echo "  ⚙️  $cmd"
-    if ! (cd "$dest" && eval "$cmd"); then
-      echo "  ❌ Failed — aborting session"
-      return 1
-    fi
-  done
+  if (( allow )); then
+    for cmd in "${W_PRE_CMDS[@]}"; do
+      [[ -z "$cmd" ]] && continue
+      echo "  ⚙️  $cmd"
+      if ! (cd "$dest" && eval "$cmd"); then
+        echo "  ❌ Failed — aborting session"
+        return 1
+      fi
+    done
+  else
+    _w_repo_commands_skipped pre "${W_PRE_CMDS[@]}"
+    _w_repo_commands_skipped window "${W_WINDOW_CMDS[@]}"
+  fi
 
   # Window 0: shell
   tmux new-session -d -s "$session_name" -c "$dest" -n "shell"
@@ -502,10 +564,12 @@ _w_dev() {
 
     echo "  🪟 $wname"
     tmux new-window -t "$session_name" -n "$wname" -c "$wdir"
-    [[ -n "$wcmd" ]] && tmux send-keys -t "$session_name:$wname" "$wcmd" Enter
+    if [[ -n "$wcmd" ]] && (( allow )); then
+      tmux send-keys -t "$session_name:$wname" "$wcmd" Enter
+    fi
   done
 
-  tmux select-window -t "$session_name:shell"
+  tmux select-window -t "${session_name}:shell"
   tmux attach-session -t "$session_name"
 }
 
@@ -645,6 +709,9 @@ _w_go() {
   elif resolved=$(_w_resolve_pr_url "$branch"); then
     echo "🔗 Resolved PR → $resolved"
     branch="$resolved"
+  elif [ $? -eq 2 ]; then
+    # A PR URL that could not be resolved: stop, never use the URL as a name
+    return 1
   fi
 
   # If the worktree exists, cd into it; otherwise create it
@@ -668,7 +735,8 @@ Usage: w add <branch>
 
 Create a new worktree and cd into it.
 
-  - If <branch> is a GitHub PR URL, resolves the branch via gh CLI.
+  - If <branch> is a GitHub PR URL, resolves the branch via gh CLI
+    (runs ${GITHUB_CMD:-${GH_CMD:-gh}}, so a gh wrapper can be used).
   - If <branch> is a GitHub branch tree URL, extracts the branch name.
   - If <branch> exists locally, checks it out in a new worktree.
   - If <branch> exists on origin, checks out the remote tracking branch.
@@ -680,6 +748,10 @@ The worktree is created at ../<repo>-worktrees/<branch> relative to the
 main repository.
 
 If the worktree already exists, just cd's into it.
+
+If a .worktree.toml exists, the matching profile's setup commands run
+after creation ONLY when WORKTREE_ALLOW_REPO_COMMANDS=1 is set; otherwise
+they are listed and skipped.
 
 If a .worktree.toml exists in the repo root, the matching profile's
 setup commands will run automatically after creation.
@@ -703,6 +775,9 @@ EOF
   elif resolved=$(_w_resolve_pr_url "$branch"); then
     echo "🔗 Resolved PR → $resolved"
     branch="$resolved"
+  elif [ $? -eq 2 ]; then
+    # A PR URL that could not be resolved: stop, never use the URL as a name
+    return 1
   fi
 
   local dest="$wtdir/$branch"
@@ -765,6 +840,9 @@ Launch a tmux dev session defined by .worktree.toml in the repo root.
   - If no <branch> is given and you're inside a worktree, uses that one.
   - The branch name is matched against profile `branches` globs.
   - First matching profile wins; falls back to [profile.default].
+  - pre and window `run` commands execute only when
+    WORKTREE_ALLOW_REPO_COMMANDS=1 is set; otherwise they are listed and
+    skipped (the tmux windows are still created).
 
 Config format (.worktree.toml):
 
@@ -1182,6 +1260,8 @@ _w_help() {
   printf "${bold}CONFIG${reset}\n"
   printf "       Place a ${bold}.worktree.toml${reset} in your repo root to define setup commands\n"
   printf "       and tmux dev sessions per branch pattern.\n"
+  printf "       Its setup, pre and window commands run only with ${yellow}WORKTREE_ALLOW_REPO_COMMANDS=1${reset}\n"
+  printf "       ${dim}(a committed config is code from the repo: review it first)${reset}.\n"
   printf "       Run ${cyan}worktree${reset} ${yellow}dev --help${reset} for the full config format and examples.\n\n"
   printf "${bold}DEPENDENCY BOOTSTRAP${reset}\n"
   printf "       On ${cyan}add${reset}, gitignored dependency dirs (${dim}node_modules, vendor${reset}) are cloned\n"
