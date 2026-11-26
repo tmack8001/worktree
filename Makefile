@@ -34,7 +34,7 @@ deps:
 
 .PHONY: lint
 lint:
-	$(SHELLCHECK) --shell=sh --severity=warning w.sh install.sh scripts/build-release.sh tests/shell-under-test.sh
+	$(SHELLCHECK) --shell=sh --severity=warning w.sh install.sh scripts/build-release.sh scripts/build-tmux.sh tests/shell-under-test.sh
 	$(SHELLCHECK) --severity=warning $(TESTS) tests/shell-under-test.bash
 
 .PHONY: test
