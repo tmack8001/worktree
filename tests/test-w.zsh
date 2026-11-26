@@ -83,6 +83,14 @@ assert_exit_code() {
 
 # ── Test environment setup ─────────────────────────────────────────
 
+# Hermetic git: a fixed, obviously fake identity and no system or global
+# config (CI runners have no user.name/user.email; a developer's signing,
+# hooks or defaults must not change the results).
+export GIT_AUTHOR_NAME="worktree test" GIT_AUTHOR_EMAIL="test@example.invalid"
+export GIT_COMMITTER_NAME="worktree test" GIT_COMMITTER_EMAIL="test@example.invalid"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG GIT_CONFIG_SYSTEM
+
 TEST_ROOT=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/w-test.XXXXXX")" && pwd -P)
 SCRIPT_DIR="${0:A:h}"
 
@@ -100,6 +108,9 @@ setup_repo() {
   local repo_dir="$TEST_ROOT/$name"
 
   git init --bare "$bare_dir" >/dev/null 2>&1
+  # main whatever init.defaultBranch says (unset on CI: master), so later
+  # clones of the remote check out main
+  git -C "$bare_dir" symbolic-ref HEAD refs/heads/main
   git clone "$bare_dir" "$repo_dir" >/dev/null 2>&1
 
   # Create initial commit on main
@@ -595,6 +606,44 @@ test_switch_from_git() {
   )
 }
 
+# _zt_tree PID: PID and all its descendants (ps -A -o pid= -o ppid=, POSIX).
+# Taken before PID is killed: its orphans are re-parented and lost after.
+_zt_tree() {
+  ps -A -o pid= -o ppid= | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      todo = root; out = ""
+      while (todo != "") {
+        n = split(todo, a, " "); todo = ""
+        for (i = 1; i <= n; i++) { out = out " " a[i]; todo = todo " " kids[a[i]] }
+        sub(/^ +/, "", todo)
+      }
+      print out
+    }'
+}
+
+# _zt_stop PID...: TERM the pids, wait until none is alive (a zombie counts as
+# gone), KILL what is left after ~10s. An orphan left running would hold the
+# caller's fds and keep `make test | ...` (and a CI job) from finishing.
+_zt_stop() {
+  local p alive n=0
+  (( $# )) || return 0
+  kill -TERM "$@" 2>/dev/null
+  while :; do
+    alive=()
+    for p in "$@"; do
+      case "$(ps -o stat= -p "$p" 2>/dev/null)" in
+        ""|Z*) ;;
+        *) alive+=("$p") ;;
+      esac
+    done
+    (( ${#alive} )) || break
+    if (( n >= 100 )); then kill -KILL "${alive[@]}" 2>/dev/null; break; fi
+    sleep 0.1; (( n++ ))
+  done
+  return 0
+}
+
 # w.zsh's worktree runs in the caller's shell and cd's directly: unlike w.sh
 # it needs no file to pass the directory out, and creates none, even killed.
 test_no_cd_temp_file() {
@@ -608,7 +657,7 @@ test_no_cd_temp_file() {
 branches = "*"
 
 [[profile.default.setup]]
-run = "touch '$TEST_ROOT/nocd-started'; while [ ! -e '$TEST_ROOT/nocd-release' ]; do sleep 1; done"
+run = "touch '$TEST_ROOT/nocd-started'; n=0; while [ ! -e '$TEST_ROOT/nocd-release' ] && [ -d '$TEST_ROOT' ] && [ \$n -lt 120 ]; do sleep 1; n=\$((n + 1)); done"
 TOML
   (
     cd "$repo"
@@ -616,12 +665,16 @@ TOML
     assert_eq "w cd leaves TMPDIR empty" "" "$(ls -A "$tmp")"
   )
   WORKTREE_ALLOW_REPO_COMMANDS=1 TMPDIR="$tmp" zsh -c 'source "$1"; cd "$2" && worktree add killed' zsh \
-    "$SCRIPT_DIR/../w.zsh" "$repo" </dev/null >/dev/null 2>&1 &
-  local pid=$! n=0
+    "$SCRIPT_DIR/../w.zsh" "$repo" </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  local pid=$! n=0 tree
   while [[ ! -e "$TEST_ROOT/nocd-started" ]] && (( n < 100 )); do sleep 0.1; (( n++ )); done
+  tree=$(_zt_tree "$pid")
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
+  # Killing the shell leaves its subshells (the setup command and its sleep)
+  # running as orphans: release them, then stop them and wait until they are gone.
   touch "$TEST_ROOT/nocd-release"
+  _zt_stop ${=tree}
   assert_eq "worktree killed mid-run leaves TMPDIR empty" "" "$(ls -A "$tmp")"
 }
 
@@ -1080,6 +1133,7 @@ test_clone_bare() {
   # Create a bare remote to clone from
   local bare_remote="$TEST_ROOT/clone-bare-remote.git"
   git init --bare "$bare_remote" >/dev/null 2>&1
+  git -C "$bare_remote" symbolic-ref HEAD refs/heads/main
   local tmp_clone="$TEST_ROOT/clone-bare-tmp"
   git clone "$bare_remote" "$tmp_clone" >/dev/null 2>&1
   (
@@ -1108,6 +1162,7 @@ test_clone_with_branch() {
   # Create a bare remote to clone from
   local bare_remote="$TEST_ROOT/clone-branch-remote.git"
   git init --bare "$bare_remote" >/dev/null 2>&1
+  git -C "$bare_remote" symbolic-ref HEAD refs/heads/main
   local tmp_clone="$TEST_ROOT/clone-branch-tmp"
   git clone "$bare_remote" "$tmp_clone" >/dev/null 2>&1
   (
@@ -1142,6 +1197,7 @@ test_clone_already_exists() {
   echo "── w clone (already exists) ──"
   local bare_remote="$TEST_ROOT/clone-dup-remote.git"
   git init --bare "$bare_remote" >/dev/null 2>&1
+  git -C "$bare_remote" symbolic-ref HEAD refs/heads/main
   local tmp_clone="$TEST_ROOT/clone-dup-tmp"
   git clone "$bare_remote" "$tmp_clone" >/dev/null 2>&1
   (

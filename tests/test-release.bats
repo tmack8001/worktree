@@ -8,6 +8,13 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+  # Hermetic git: a fixed, obviously fake identity and no system or global
+  # config (CI runners have no user.name/user.email; a developer's signing,
+  # hooks or defaults must not change the results).
+  export GIT_AUTHOR_NAME="worktree test" GIT_AUTHOR_EMAIL="test@example.invalid"
+  export GIT_COMMITTER_NAME="worktree test" GIT_COMMITTER_EMAIL="test@example.invalid"
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG GIT_CONFIG_SYSTEM
   # Listings are read with GNU tar (gtar on macOS), whose -tv format the
   # tests parse; build-release.sh requires GNU tar anyway.
   GTAR=""

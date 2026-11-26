@@ -6,6 +6,13 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+  # Hermetic git: a fixed, obviously fake identity and no system or global
+  # config (CI runners have no user.name/user.email; a developer's signing,
+  # hooks or defaults must not change the results).
+  export GIT_AUTHOR_NAME="worktree test" GIT_AUTHOR_EMAIL="test@example.invalid"
+  export GIT_COMMITTER_NAME="worktree test" GIT_COMMITTER_EMAIL="test@example.invalid"
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG GIT_CONFIG_SYSTEM
   # The real tmux (if any), captured before a test puts a fake one on PATH,
   # so teardown can always stop the test's private tmux server.
   # WORKTREE_TEST_TMUX=<path> (make test-tmux TMUX_BIN=...) puts that tmux
@@ -32,6 +39,9 @@ setup() {
   export TEST_DIR
 
   git init --bare "$TEST_DIR/remote.git" -q
+  # main whatever init.defaultBranch says (unset on CI: master), so later
+  # clones of the remote check out main
+  git -C "$TEST_DIR/remote.git" symbolic-ref HEAD refs/heads/main
   git clone       "$TEST_DIR/remote.git" "$TEST_DIR/repo" -q
   git -C "$TEST_DIR/repo" checkout -b main -q
   echo "init"   > "$TEST_DIR/repo/README.md"
@@ -52,6 +62,9 @@ setup() {
 }
 
 teardown() {
+  # Stop whatever a test left running in the background (also when it failed
+  # half-way): an orphan holding one of bats' fds keeps bats waiting forever.
+  _bg_stop
   # Stop the private tmux server, if a test started one: a detached server
   # inherits bats' output pipe and would keep bats waiting forever.
   if [ -n "$REAL_TMUX" ]; then
@@ -1476,6 +1489,73 @@ _gh_setup() {
 # ── _w_load_config temp dirs ───────────────────────────────────────
 
 # Point TMPDIR at a private, empty dir so w-cfg.* dirs can be counted.
+# ── Background processes ─────────────────────────────────────────
+#
+# A test that kills a running worktree leaves its subshells behind: killing a
+# shell does not kill the subshells and commands it started (there is no job
+# control, so no process group of their own to signal). Such an orphan keeps
+# running after the test, holds whatever fds it inherited and, if one of them
+# is bats' output, keeps bats (and make, and a CI job) from ever finishing.
+#
+# _bg_start CMD...: run CMD in the background with stdin, stdout and stderr on
+# /dev/null and every other fd up to 9 closed (bats' fd 3 and the files and
+# pipes it keeps on 4-9), and record its pid in BG_PID and for teardown.
+# _bg_tree PID: PID and all its descendants (ps -A -o pid= -o ppid=, POSIX).
+# _bg_stop [PID...]: TERM the given pids (default: every tree _bg_start began,
+# as seen now), wait for them to exit (zombies count as gone), KILL what is
+# left after ~10s, and reap the direct children. Ends with none of them alive.
+
+_BG_PIDS=""
+
+_bg_start() {
+  "$@" </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  BG_PID=$!
+  _BG_PIDS="$_BG_PIDS $BG_PID"
+}
+
+_bg_tree() {
+  ps -A -o pid= -o ppid= | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      todo = root; out = ""
+      while (todo != "") {
+        n = split(todo, a, " "); todo = ""
+        for (i = 1; i <= n; i++) { out = out " " a[i]; todo = todo " " kids[a[i]] }
+        sub(/^ +/, "", todo)
+      }
+      print out
+    }'
+}
+
+_bg_stop() {
+  local pids="$*" p alive n=0
+  if [ -z "$pids" ]; then
+    for p in $_BG_PIDS; do pids="$pids $(_bg_tree "$p")"; done
+  fi
+  # shellcheck disable=SC2086
+  [ -z "${pids// /}" ] || kill -TERM $pids 2>/dev/null || true
+  while :; do
+    alive=""
+    for p in $pids; do
+      case "$(ps -o stat= -p "$p" 2>/dev/null)" in
+        ""|Z*) ;;                    # gone, or a zombie waiting to be reaped
+        *) alive="$alive $p" ;;
+      esac
+    done
+    [ -z "$alive" ] && break
+    if [ "$n" -ge 100 ]; then
+      # shellcheck disable=SC2086
+      kill -KILL $alive 2>/dev/null || true
+      sleep 0.1
+      break
+    fi
+    sleep 0.1; n=$((n + 1))
+  done
+  for p in $_BG_PIDS; do wait "$p" 2>/dev/null || true; done
+  _BG_PIDS=""
+  return 0
+}
+
 _private_tmpdir() {
   mkdir -p "$TEST_DIR/tmp"
   export TMPDIR="$TEST_DIR/tmp"
@@ -1518,13 +1598,14 @@ _cfg_dir_count() {
   { printf '[profile.default]\nbranches = "*"\n'
     awk 'BEGIN { for (i = 0; i < 50000; i++) print "k" i " = \"v\"" }'
   } > "$TEST_DIR/big.toml"
-  $SCRIPT_SH -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml" \
-    </dev/null >/dev/null 2>&1 3>&- &
-  local pid=$!
+  _bg_start $SCRIPT_SH -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml"
+  local pid=$BG_PID tree
   sleep 1
   kill -0 "$pid"                  # still parsing: the kill lands mid-parse
+  tree=$(_bg_tree "$pid")
   kill -TERM "$pid"
   wait "$pid" || true
+  _bg_stop $tree                  # and whatever the killed shell left running
   [ "$(_cfg_dir_count)" = "0" ]
   [ -z "$(ls -A "$TMPDIR")" ]
 }
@@ -1617,23 +1698,28 @@ _cd_file_count() {
 
 @test "w-cd: worktree killed with TERM mid-run leaves no w-cd file" {
   _private_tmpdir
-  # a setup command that signals it has started, then waits to be released
+  # A setup command that signals it has started, then waits. It never waits
+  # for long: it stops once TEST_DIR is gone (teardown) or after 120s, so even
+  # an orphan that escaped _bg_stop cannot run on forever.
   cat > "$REPO/.worktree.toml" <<TOML
 [profile.default]
 branches = "*"
 
 [[profile.default.setup]]
-run = "touch '$TEST_DIR/started'; while [ ! -e '$TEST_DIR/release' ]; do sleep 1; done"
+run = "touch '$TEST_DIR/started'; n=0; while [ -d '$TEST_DIR' ] && [ \$n -lt 120 ]; do sleep 1; n=\$((n + 1)); done"
 TOML
-  WORKTREE_ALLOW_REPO_COMMANDS=1 $W_SH -c '. "$1"; cd "$2" && worktree add killed' sh \
-    "$REPO_ROOT/w.sh" "$REPO" </dev/null >/dev/null 2>&1 3>&- &
-  local pid=$! n=0
+  _bg_start env WORKTREE_ALLOW_REPO_COMMANDS=1 $W_SH -c '. "$1"; cd "$2" && worktree add killed' sh \
+    "$REPO_ROOT/w.sh" "$REPO"
+  local pid=$BG_PID n=0 tree
   while [ ! -e "$TEST_DIR/started" ] && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
   [ -e "$TEST_DIR/started" ]
   kill -0 "$pid"                    # still running: the kill lands mid-run
+  tree=$(_bg_tree "$pid")
   kill -TERM "$pid"
   wait "$pid" || true
-  touch "$TEST_DIR/release"         # let the orphaned setup command finish
+  # The killed shell's subshells (worktree's, the setup command's and its
+  # sleep) are orphans now: stop them and wait until they are gone.
+  _bg_stop $tree
   [ "$(_cd_file_count)" = "0" ]
 }
 

@@ -33,6 +33,22 @@ its tag.
 
 ### Fixed
 
+- Tests no longer depend on the machine's git config. The bats suites and the zsh suite set a fake identity
+  (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`: `worktree test`, `test@example.invalid`), ignore the system and global
+  config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`) and point the test remotes' `HEAD` at `main`.
+  On the GitHub runners, which have no `user.name`/`user.email`, every test that commits failed in setup
+  ("Author identity unknown"); with git's default `init.defaultBranch` (master) two clones of the test remote
+  had no checkout. With no global or system git config: `make test` 192/192 bats and 280/280 zsh checks (was
+  42/192, 199/280), `make shells` 4 x 192/192, `make test-tmux` 12/12 with tmux 3.4 and 2.1 (was 0/12).
+- The tests that kill a running `worktree` (or `_w_load_config`) no longer leave processes behind. Killing the
+  shell left its subshells and the setup command's `sleep` loop running; the loop waited for a release file that
+  teardown deleted, so it never ended, and it held fds inherited from bats. The tests now record the process tree
+  before the kill, stop it and wait until it is gone (also in teardown when a test fails), start background
+  commands with fds 3 to 9 closed, and the waiting setup command ends by itself after 120s or once the test
+  directory is gone. This is the likely cause of the macOS CI jobs that printed every result and then hung until
+  their timeout ("Terminate orphan process: sleep", "bash"); not yet verified on macOS.
+- CI timeouts raised to fit the measured run times: `test` 30 min (step 25), `shells` and `shells-macos` 50 min
+  (`make shells` step 40, zsh suite step 10), `tmux` 30 min (step 15).
 - `w.sh`: `worktree` no longer leaves a `w-cd.*` file in `$TMPDIR` when it is killed mid-run. The file that
   carries the directory to `cd` into out of the command's subshell is now opened (to write on fd 9, to read back
   on fd 8) and removed before the command starts, so it has no name while the command runs; no trap is set and

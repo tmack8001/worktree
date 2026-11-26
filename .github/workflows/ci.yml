@@ -38,7 +38,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,7 +59,7 @@ jobs:
           zsh --version
           git --version
       - name: make test
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: make test < /dev/null
 
   shells:
@@ -73,7 +73,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       CI: "true"
     steps:
@@ -91,9 +91,10 @@ jobs:
           dpkg-query -W dash busybox zsh
           git --version
       - name: make shells
-        timeout-minutes: 25
+        timeout-minutes: 40
         run: make shells < /dev/null
       - name: zsh suite (w.zsh)
+        timeout-minutes: 10
         run: zsh tests/test-w.zsh < /dev/null
 
   shells-macos:
@@ -106,7 +107,7 @@ jobs:
       matrix:
         os: [macos-15, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       CI: "true"
     steps:
@@ -127,9 +128,10 @@ jobs:
           /bin/zsh --version
           git --version
       - name: make shells
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: make shells SHELLS="/bin/sh,/bin/bash,/bin/bash --posix,dash" < /dev/null
       - name: zsh suite (w.zsh, /bin/zsh)
+        timeout-minutes: 10
         run: /bin/zsh tests/test-w.zsh < /dev/null
 
   tmux:
@@ -148,7 +150,7 @@ jobs:
           - { name: "brew (macos-latest)", os: macos-latest }
     name: tmux ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,5 +178,5 @@ jobs:
           command -v tmux >/dev/null 2>&1 || brew install tmux
           echo "TMUX_BIN=$(command -v tmux)" >> "$GITHUB_ENV"
       - name: make test-tmux
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: make test-tmux TMUX_BIN="$TMUX_BIN" < /dev/null
