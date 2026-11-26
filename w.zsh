@@ -107,17 +107,30 @@ _w_branch_worktree_path() {
 
 # ── tmux session names ─────────────────────────────────────────────
 #
-# tmux does not store a session name as given: it replaces '.' and ':' with
-# '_' and escapes '\', '$' and control characters (and, outside a UTF-8
-# locale, replaces non-ASCII characters). A target like `=repo-v1.2` then names
-# no session (worse, `.` and `:` split a target into window and pane), so the
-# name used for new-session and every later target must be one tmux stores
-# unchanged. _w_tmux_name makes it one: '.' and ':' become '_' as tmux does,
-# and so does every other byte that is not printable ASCII or is '\' or '$'.
+# tmux does not store every session name as given, and how depends on the
+# version (checked with tmux 2.1, 2.6, 2.9a, 3.0a, 3.2a, 3.3a, 3.4, 3.5a and
+# 3.8): '.' and ':' are refused (2.1 to 3.0a), stored as '_' (3.2a to 3.5a)
+# or kept (3.8), and in a target they split the session from the window and
+# pane; '\', '$', control and non-ASCII bytes are escaped or replaced; '#'
+# starts a format that new-session expands (2.9a on, not 2.6: `#S`, `#{...}`,
+# `##`; 3.8 also drops a trailing '#'); and an argument ending in ';' is a
+# command separator. A target like `=repo-v1.2` can then name no session, so
+# the name used for new-session and every later target must be one tmux
+# stores unchanged. _w_tmux_name makes it one: every byte that is not
+# printable ASCII, or is one of . : \ $ # ;, becomes '_'.
 # (tr on bytes, as in w.sh, so both variants give the same name.)
 
 _w_tmux_name() {
-  printf '%s' "$1" | LC_ALL=C tr -c '\040-\043\045-\055\057-\071\073-\133\135-\176' '_'
+  printf '%s' "$1" | LC_ALL=C tr -c '\040-\042\045-\055\057-\071\074-\133\135-\176' '_'
+}
+
+# A directory for tmux's -c, which tmux expands as a format (every version
+# checked: `#S`, `#{...}`, `##`) and, ending in ';', takes as a command
+# separator: '#' is doubled, and a trailing ';' gets a '/' after it.
+_w_tmux_dir() {
+  local d="${1//\#/##}"
+  [[ "$d" == *\; ]] && d="$d/"
+  printf '%s' "$d"
 }
 
 # The tmux session for a worktree: the profile's `session` override if given,
@@ -614,7 +627,7 @@ _w_dev() {
   fi
 
   # Window 0: shell
-  tmux new-session -d -s "$session_name" -c "$dest" -n "shell"
+  tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell"
 
   local i
   for (( i = 1; i <= ${#W_WINDOW_NAMES[@]}; i++ )); do
@@ -628,7 +641,7 @@ _w_dev() {
     wdir="${wdir:-$dest}"
 
     echo "  🪟 $wname"
-    tmux new-window -t "=$session_name:" -n "$wname" -c "$wdir"
+    tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")"
     if [[ -n "$wcmd" ]] && (( allow )); then
       tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
     fi

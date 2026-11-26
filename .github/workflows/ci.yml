@@ -31,8 +31,8 @@ jobs:
 
   test:
     # make test: the bats suites (w.sh, install.sh, build-release.sh) and the zsh suite (w.zsh).
-    # The suites start no real tmux server (tests stub tmux and isolate TMUX_TMPDIR), stdin is /dev/null and
-    # output a pipe, so a hang is a bug; timeout-minutes bounds it anyway.
+    # Tests that need tmux start a private server under their own TMUX_TMPDIR and stop it in teardown (the
+    # others stub tmux); stdin is /dev/null and output a pipe, so a hang is a bug; timeout-minutes bounds it anyway.
     strategy:
       fail-fast: false
       matrix:
@@ -61,3 +61,124 @@ jobs:
       - name: make test
         timeout-minutes: 15
         run: make test < /dev/null
+
+  shells:
+    # make shells on Ubuntu LTS: the bats suites with w.sh, install.sh and build-release.sh run under dash,
+    # bash --posix, busybox ash and bash (TEST_SH, tests/shell-under-test.bash; bats itself runs under bash),
+    # then the zsh suite. 22.04 is the oldest LTS in the support floor, 24.04 the latest. CI=true: a shell
+    # named in SHELLS that is missing fails the job, it is never skipped.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dash, busybox and zsh
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q dash busybox zsh
+      - name: Install bats (apt on 24.04; 22.04's apt bats is 1.2, so npm bats 1.10.0 there)
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          if [ "$MATRIX_OS" = ubuntu-22.04 ]; then sudo npm install -g bats@1.10.0; else sudo apt-get install -y -q bats; fi
+      - name: Shell and tool versions
+        run: |
+          bats --version
+          bash --version | head -n 1
+          dpkg-query -W dash busybox zsh
+          git --version
+      - name: make shells
+        timeout-minutes: 25
+        run: make shells < /dev/null
+      - name: zsh suite (w.zsh)
+        run: zsh tests/test-w.zsh < /dev/null
+
+  shells-macos:
+    # The macOS legs: stock /bin/sh and /bin/bash (bash 3.2, the bash floor), /bin/bash --posix, and dash from
+    # Homebrew on BSD userland; then the zsh suite under /bin/zsh. busybox has no Homebrew formula, so busybox
+    # ash runs only on Ubuntu. macos-14 is the oldest macOS in the support floor, macos-latest the latest; if
+    # GitHub retires the macos-14 image, that leg is dropped with a CHANGELOG entry. Intel macOS is not a leg.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install bats, dash and GNU tar (build-release.sh)
+        run: |
+          command -v bats >/dev/null 2>&1 || brew install bats-core
+          command -v dash >/dev/null 2>&1 || brew install dash
+          command -v gtar >/dev/null 2>&1 || brew install gnu-tar
+      - name: Shell and tool versions
+        run: |
+          sw_vers
+          bats --version
+          /bin/bash --version | head -n 1
+          /bin/sh -c 'echo "/bin/sh: ${BASH_VERSION:-not bash}"'
+          /bin/zsh --version
+          git --version
+      - name: make shells
+        timeout-minutes: 35
+        run: make shells SHELLS="/bin/sh,/bin/bash,/bin/bash --posix,dash" < /dev/null
+      - name: zsh suite (w.zsh, /bin/zsh)
+        run: /bin/zsh tests/test-w.zsh < /dev/null
+
+  tmux:
+    # make test-tmux: only the real-tmux tests (exact `=name` targets, session-name rewriting), once per tmux:
+    # the floor, 2.1 (built from the release tarball, checksum pinned: 1.9a and 2.0 have no `=name` targets),
+    # the Ubuntu LTS packages (22.04: 3.2a, 24.04: 3.4) and Homebrew's current tmux on macos-latest.
+    # The tests start their own tmux server under a private TMUX_TMPDIR and stop it in teardown.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "2.1 (floor, from source)", os: ubuntu-24.04, source: "2.1", sha256: "31564e7bf4bcef2defb3cb34b9e596bd43a3937cad9e5438701a81a5a9af6176" }
+          - { name: "apt (ubuntu-22.04)", os: ubuntu-22.04 }
+          - { name: "apt (ubuntu-24.04)", os: ubuntu-24.04 }
+          - { name: "brew (macos-latest)", os: macos-latest }
+    name: tmux ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install bats and tmux (ubuntu)
+        if: runner.os == 'Linux'
+        env:
+          TMUX_SOURCE: ${{ matrix.source }}
+          TMUX_SHA256: ${{ matrix.sha256 }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          sudo apt-get update -q
+          if [ "$MATRIX_OS" = ubuntu-22.04 ]; then sudo npm install -g bats@1.10.0; else sudo apt-get install -y -q bats; fi
+          if [ -n "$TMUX_SOURCE" ]; then
+            sudo apt-get install -y -q build-essential libevent-dev libncurses-dev
+            sh scripts/build-tmux.sh "$TMUX_SOURCE" "$TMUX_SHA256" "$RUNNER_TEMP/tmux-bin"
+            echo "TMUX_BIN=$RUNNER_TEMP/tmux-bin/tmux" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y -q tmux
+            echo "TMUX_BIN=$(command -v tmux)" >> "$GITHUB_ENV"
+          fi
+      - name: Install bats and tmux (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v bats >/dev/null 2>&1 || brew install bats-core
+          command -v tmux >/dev/null 2>&1 || brew install tmux
+          echo "TMUX_BIN=$(command -v tmux)" >> "$GITHUB_ENV"
+      - name: make test-tmux
+        timeout-minutes: 10
+        run: make test-tmux TMUX_BIN="$TMUX_BIN" < /dev/null

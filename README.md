@@ -6,7 +6,7 @@ The command is `worktree`, with `w` and `wt` set up as aliases by default — us
 
 Two variants are available:
 - `w.zsh` — full-featured, requires zsh
-- `w.sh` — POSIX sh compatible, works with bash, dash, and others
+- `w.sh` — POSIX sh compatible: bash, dash, busybox ash and other POSIX shells (see [Supported environments](#supported-environments))
 
 > [!WARNING]
 > **Security: `.worktree.toml` is code from the repository.** A committed `.worktree.toml` can contain
@@ -81,7 +81,23 @@ unalias wt   # keep only w
   can pick the identity; the repo is always passed explicitly as `-R owner/repo`.
 - `zsh` or POSIX `sh` / `bash` (required)
 - `fzf` (optional — interactive worktree switcher)
-- `tmux` (optional — `w dev` sessions)
+- `tmux` (optional — `w dev` sessions), 2.1 or newer
+
+### Supported environments
+
+What the tests run on. "CI" means a job in `.github/workflows/ci.yml` runs it; "local" means it was run by hand
+while writing this section.
+
+| | Supported | How it is tested |
+|---|---|---|
+| `w.sh` shells | any POSIX sh, bash 3.2 and newer | `make shells`: the bats suites with `w.sh`, `install.sh` and `scripts/build-release.sh` run under each shell (`TEST_SH`). Local and CI (Ubuntu 22.04 and 24.04): dash, `bash --posix`, busybox ash, bash 5. CI only (macOS 14 and latest): `/bin/sh`, `/bin/bash` and `/bin/bash --posix` (bash 3.2), dash. |
+| `w.zsh` | zsh 5.x | `tests/test-w.zsh`. Local: zsh 5.9. CI: the zsh of Ubuntu 22.04 and 24.04 and macOS 14 and latest. |
+| OS | macOS 14 and newer, Ubuntu LTS (22.04, 24.04) | CI only for macOS and for Ubuntu 22.04; Ubuntu 24.04 also local. |
+| tmux | 2.1 and newer | `make test-tmux` (the real-tmux tests). Local: tmux 2.1, 2.2, 2.6, 2.9a, 3.0a, 3.2a, 3.3a, 3.4, 3.5a and 3.8 pass; 1.9a and 2.0 fail (no exact `=name` targets). CI: 2.1 built from source, the Ubuntu 22.04 and 24.04 packages, Homebrew's tmux. |
+
+Not tested, so not claimed: native Windows (WSL is Linux), Intel macOS, other Linux distributions, git versions
+other than the runners' and the local one (`w.sh` and `w.zsh` use `git rev-parse --path-format=absolute`,
+which needs git 2.31 or newer). The macOS legs and Ubuntu 22.04 have not run yet: they run in CI.
 
 ## Usage
 
@@ -264,8 +280,18 @@ bats tests/test-release.bats # BATS suite (scripts/build-release.sh; needs GNU t
 zsh tests/test-w.zsh   # zsh-specific suite (w.zsh)
 ```
 
-Install test dependencies with `make deps` (requires Homebrew). The tests never start a real tmux server.
+Install test dependencies with `make deps` (requires Homebrew). The tests never touch your tmux server: the
+ones that need tmux start a private server under a temporary `TMUX_TMPDIR` and stop it afterwards.
 `make lint` runs shellcheck on `w.sh`, `install.sh` and the bats suites.
+
+Under other shells (`w.sh`, `install.sh` and `build-release.sh` run under the shell, bats itself under bash):
+
+```sh
+make shells                                 # dash, bash --posix, busybox ash, bash (a missing one is skipped)
+make shells SHELLS="/bin/sh,/bin/bash"      # any list, comma separated
+TEST_SH=dash bats tests/test-w.bats         # one suite under one shell
+make test-tmux TMUX_BIN=/path/to/tmux       # only the real-tmux tests, against that tmux
+```
 
 ## Releasing
 

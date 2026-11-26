@@ -8,14 +8,23 @@ setup_file() {
   export REPO_ROOT
   # The real tmux (if any), captured before a test puts a fake one on PATH,
   # so teardown can always stop the test's private tmux server.
+  # WORKTREE_TEST_TMUX=<path> (make test-tmux TMUX_BIN=...) puts that tmux
+  # first on PATH as `tmux`, for w.sh and for the tests alike.
+  if [ -n "${WORKTREE_TEST_TMUX:-}" ]; then
+    mkdir -p "$BATS_FILE_TMPDIR/tmux-bin"
+    ln -sf "$WORKTREE_TEST_TMUX" "$BATS_FILE_TMPDIR/tmux-bin/tmux"
+    PATH="$BATS_FILE_TMPDIR/tmux-bin:$PATH"
+    export PATH
+  fi
   REAL_TMUX="$(command -v tmux 2>/dev/null || true)"
   export REAL_TMUX
 }
 
 setup() {
-  # Source in setup so every test subprocess has the functions available
-  # shellcheck source=../w.sh
-  source "$REPO_ROOT/w.sh"
+  # Source in setup so every test subprocess has the functions available; with
+  # TEST_SH set they run under that shell (tests/shell-under-test.bash).
+  load shell-under-test
+  w_source "$REPO_ROOT/w.sh"
 
   TEST_DIR="$(mktemp -d)"
   # Resolve symlinks (macOS /tmp -> /private/tmp) so path comparisons work
@@ -382,7 +391,7 @@ TOML
 @test "w ls: marks current worktree with ▶" {
   cd "$REPO"
   # run spawns a subshell; pass PWD explicitly so _w_ls_format can compare
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree ls"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && cd '$REPO' && worktree ls"
   [[ "$output" == *"▶"* ]]
 }
 
@@ -392,7 +401,7 @@ TOML
   cd "$REPO"
   worktree add rm-target 2>/dev/null
   cd "$REPO"
-  echo "rm-target" | bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm rm-target" 2>/dev/null
+  echo "rm-target" | $W_SH -c ". '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm rm-target" 2>/dev/null
   [ ! -d "$WTS/rm-target" ]
 }
 
@@ -400,7 +409,7 @@ TOML
   cd "$REPO"
   worktree add abort-branch 2>/dev/null
   cd "$REPO"
-  run bash -c "echo 'wrong' | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm abort-branch 2>&1)"
+  run $W_SH -c "echo 'wrong' | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm abort-branch 2>&1)"
   [[ "$output" == *"Aborted"* ]]
   [ -d "$WTS/abort-branch" ]
 }
@@ -409,7 +418,7 @@ TOML
   cd "$REPO"
   worktree add feature/foo >/dev/null 2>&1
   mkdir -p "$WTS/feature/foo/sub"
-  run bash -c "echo 'feature/foo' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/foo/sub' && worktree rm 2>&1)"
+  run $W_SH -c "echo 'feature/foo' | (. '$REPO_ROOT/w.sh' && cd '$WTS/feature/foo/sub' && worktree rm 2>&1)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"delete branch 'feature/foo'"* ]]
   [ ! -d "$WTS/feature/foo" ]
@@ -420,7 +429,7 @@ TOML
 @test "w rm: without a branch, a detached HEAD fails closed" {
   cd "$REPO"
   git -C "$REPO" worktree add --detach "$WTS/feature/detached" -q
-  run bash -c "echo 'feature' | (source '$REPO_ROOT/w.sh' && cd '$WTS/feature/detached' && worktree rm 2>&1)"
+  run $W_SH -c "echo 'feature' | (. '$REPO_ROOT/w.sh' && cd '$WTS/feature/detached' && worktree rm 2>&1)"
   [ "$status" -eq 1 ]
   [[ "$output" == *"HEAD is detached"* ]]
   [[ "$output" != *"Type the name"* ]]
@@ -434,7 +443,7 @@ TOML
   worktree add feature/spaced >/dev/null 2>&1
   [ -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
   cd "$TEST_DIR/my repo-worktrees/feature/spaced"
-  run bash -c 'echo "feature/spaced" | (source "$REPO_ROOT/w.sh" && worktree rm 2>&1)'
+  run $W_SH -c 'echo "feature/spaced" | (. "$REPO_ROOT/w.sh" && worktree rm 2>&1)'
   [ "$status" -eq 0 ]
   [ ! -d "$TEST_DIR/my repo-worktrees/feature/spaced" ]
   run git -C "$sp" show-ref --verify --quiet refs/heads/feature/spaced
@@ -447,7 +456,7 @@ TOML
 @test "w rm <branch>: removes the worktree git has the branch in, whatever its directory" {
   cd "$REPO"
   git -C "$REPO" worktree add -q -b feature/deep "$WTS/flat-dir"
-  run bash -c "echo feature/deep | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm feature/deep 2>&1)"
+  run $W_SH -c "echo feature/deep | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm feature/deep 2>&1)"
   [ "$status" -eq 0 ]
   [ ! -d "$WTS/flat-dir" ]
   run git -C "$REPO" show-ref --verify --quiet refs/heads/feature/deep
@@ -459,7 +468,7 @@ TOML
   # $WTS/foo holds branch bar; branch foo lives in $WTS/other
   git -C "$REPO" worktree add -q -b bar "$WTS/foo"
   git -C "$REPO" worktree add -q -b foo "$WTS/other"
-  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  run $W_SH -c "echo foo | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
   [ "$status" -eq 0 ]
   [ -d "$WTS/foo" ]
   [ "$(git -C "$WTS/foo" symbolic-ref HEAD)" = "refs/heads/bar" ]
@@ -472,7 +481,7 @@ TOML
   cd "$REPO"
   git -C "$REPO" branch lonely
   mkdir -p "$WTS/lonely"
-  run bash -c "echo lonely | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm lonely 2>&1)"
+  run $W_SH -c "echo lonely | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm lonely 2>&1)"
   [ "$status" -eq 1 ]
   [[ "$output" == *"No worktree has branch 'lonely' checked out"* ]]
   [[ "$output" != *"Type the name"* ]]
@@ -482,7 +491,7 @@ TOML
 
 @test "w rm <branch>: the branch of the main working tree is refused" {
   cd "$REPO"
-  run bash -c "echo main | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm main 2>&1)"
+  run $W_SH -c "echo main | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm main 2>&1)"
   [ "$status" -eq 1 ]
   [[ "$output" == *"checked out in the main working tree ($REPO)"* ]]
   [[ "$output" != *"Type the name"* ]]
@@ -562,7 +571,7 @@ TOML
   worktree add tmux-test 2>/dev/null
   local nopath
   nopath="$(_path_without_tmux)"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$nopath' worktree dev 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$nopath' worktree dev 2>&1"
   [ "$status" -eq 1 ]
   [[ "$output" == *"tmux not installed"* ]]
   [[ "$output" != *"Starting dev session"* ]]
@@ -578,6 +587,17 @@ TOML
 # are closed so the server cannot keep bats' pipes open.
 _tmux_session() {
   "$REAL_TMUX" new-session -d -s "$1" </dev/null >/dev/null 2>&1 3>&-
+}
+
+# Skip a real-tmux test when tmux is missing; with WORKTREE_TEST_REQUIRE_TMUX=1
+# (make test-tmux, the CI tmux matrix) a missing tmux fails it instead.
+_need_tmux() {
+  [ -n "$REAL_TMUX" ] && return 0
+  if [ "${WORKTREE_TEST_REQUIRE_TMUX:-}" = 1 ]; then
+    echo "tmux not installed (WORKTREE_TEST_REQUIRE_TMUX=1)" >&2
+    return 1
+  fi
+  skip "tmux not installed"
 }
 
 _tmux_has() {
@@ -603,23 +623,23 @@ FAKE
 }
 
 @test "tmux exact: w rm does not kill a session that only starts with the name" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
   _tmux_session repo-foo-bar
-  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  run $W_SH -c "echo foo | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
   [ "$status" -eq 0 ]
   [ ! -d "$WTS/foo" ]
   _tmux_has repo-foo-bar
 }
 
 @test "tmux exact: w rm kills its own session and leaves the longer one" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
   _tmux_session repo-foo-bar
   _tmux_session repo-foo
-  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  run $W_SH -c "echo foo | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
   [ "$status" -eq 0 ]
   run _tmux_has repo-foo
   [ "$status" -ne 0 ]
@@ -627,7 +647,7 @@ FAKE
 }
 
 @test "tmux exact: w dev does not attach a session that only starts with the name" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   _write_dev_toml
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
@@ -646,7 +666,7 @@ FAKE
 }
 
 @test "tmux exact: w dev reattaches its own session, not the longer one" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   _write_dev_toml
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
@@ -672,13 +692,24 @@ FAKE
   [ "$(_w_tmux_name 'plain-name_09 ok')" = "plain-name_09 ok" ]
 }
 
+@test "tmux names: _w_tmux_name maps # (a tmux format) and ; (a tmux command separator) to _" {
+  [ "$(_w_tmux_name 'issue#S;')" = "issue_S_" ]
+  [ "$(_w_tmux_name 'a;b#{session_id}c##')" = "a_b_{session_id}c__" ]
+}
+
+@test "tmux names: _w_tmux_dir escapes a -c directory tmux would expand or split" {
+  [ "$(_w_tmux_dir '/x/issue#S;')" = "/x/issue##S;/" ]
+  [ "$(_w_tmux_dir '/x/a##b#{host}')" = "/x/a####b##{host}" ]
+  [ "$(_w_tmux_dir '/x/plain dir;x')" = "/x/plain dir;x" ]
+}
+
 @test "tmux names: the session override is made tmux-safe too" {
   [ "$(_w_session_name /x/my.repo fix/v1.2)" = "my_repo-fix-v1_2" ]
   [ "$(_w_session_name /x/repo b 'my.session:1')" = "my_session_1" ]
 }
 
 @test "tmux names: w dev and w rm work with . and : in the repo and . in the branch" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   local r="$TEST_DIR/my.re:po" s="my_re_po-fix-v1_2"
   git clone -q "$TEST_DIR/remote.git" "$r"
   REPO="$r" _write_dev_toml
@@ -703,7 +734,42 @@ FAKE
   [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
   [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
 
-  run bash -c "echo fix/v1.2 | (source '$REPO_ROOT/w.sh' && cd '$r' && worktree rm fix/v1.2 2>&1)"
+  run $W_SH -c "echo fix/v1.2 | (. '$REPO_ROOT/w.sh' && cd '$r' && worktree rm fix/v1.2 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has "$s"
+  [ "$status" -ne 0 ]
+}
+
+# tmux expands formats (#S, #{...}, ##) in a new session's name (2.9a and
+# later; 3.8 also drops a trailing #) and in -c directories, and takes an
+# argument ending in ; as a command separator: such a branch got a session no
+# target names, started in the wrong directory.
+@test "tmux names: w dev and w rm work with # and ; in the branch" {
+  _need_tmux
+  local b='issue#S;' s="repo-issue_S_"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add "$b" >/dev/null 2>&1
+  [ -d "$WTS/$b" ]
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/$b"
+
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-sessions -F '#{session_name}' 3>&-)" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+  # both windows' shells start in the worktree, not a format-expanded path
+  [ "$("$REAL_TMUX" list-panes -s -t "=$s" -F '#{pane_current_path}' 3>&- | sort -u)" = "$WTS/$b" ]
+
+  : > "$TEST_DIR/attach.log"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to $s"* ]]
+  [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+
+  run $W_SH -c "echo '$b' | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm '$b' 2>&1)"
   [ "$status" -eq 0 ]
   run _tmux_has "$s"
   [ "$status" -ne 0 ]
@@ -721,7 +787,7 @@ FAKE
 @test "w (bare): falls back gracefully outside a git repo" {
   local nopath
   nopath="$(_path_without_tmux)"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$nopath' worktree 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$nopath' worktree 2>&1"
   [[ "$output" != *"Not in a git repository"* ]]
   [[ "$output" == *"fzf not installed"* ]]
 }
@@ -846,27 +912,27 @@ FAKE
 }
 
 @test "_w_resolve_pr_url: errors when gh not installed" {
-  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: normalizes /pulls/ to /pull/ in error message" {
   # gh is made unavailable (GITHUB_CMD points nowhere) so we can only confirm the URL is normalised
   # before gh is called (visible in the error output)
-  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
   # Returns non-zero (gh not found), but must NOT output /pulls/ in any
   # gh-related message — the URL was already normalised before that call
   [[ "$output" != *"/pulls/"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts http:// PR URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
   # gh not installed, but we get the gh error (not "not a PR URL")
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts trailing-slash URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
+  run $W_SH -c ". '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
@@ -1226,7 +1292,7 @@ _cfg_dir_count() {
   { printf '[profile.default]\nbranches = "*"\n'
     awk 'BEGIN { for (i = 0; i < 50000; i++) print "k" i " = \"v\"" }'
   } > "$TEST_DIR/big.toml"
-  sh -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml" \
+  $SCRIPT_SH -c '. "$1"; _w_load_config "$2" anything' sh "$REPO_ROOT/w.sh" "$TEST_DIR/big.toml" \
     </dev/null >/dev/null 2>&1 3>&- &
   local pid=$!
   sleep 1
@@ -1470,7 +1536,7 @@ TOML
 
 @test "_w_resolve_dep_dirs: WORKTREE_DEP_DIRS replaces toml + defaults" {
   printf 'dep_dirs = "shared_vendor"\n' > "$REPO/.worktree.toml"
-  run env WORKTREE_DEP_DIRS="only_this" bash -c "source '$REPO_ROOT/w.sh'; _w_resolve_dep_dirs '$REPO' main"
+  run env WORKTREE_DEP_DIRS="only_this" $W_SH -c ". '$REPO_ROOT/w.sh'; _w_resolve_dep_dirs '$REPO' main"
   [ "$output" = "only_this" ]
 }
 
