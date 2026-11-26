@@ -1684,6 +1684,11 @@ test_tmux_names() {
   assert_eq "_w_tmux_name maps \\ \$ tab and non-ASCII bytes to _" "a_b_c_d__ e" \
     "$(_w_tmux_name $'a\\b$c\tdé e')"
   assert_eq "_w_tmux_name keeps a plain name" "plain-name_09 ok" "$(_w_tmux_name 'plain-name_09 ok')"
+  assert_eq "_w_tmux_name maps # (a tmux format) and ; (a command separator) to _" "issue_S_" \
+    "$(_w_tmux_name 'issue#S;')"
+  assert_eq "_w_tmux_name maps every # and ;" "a_b_{session_id}c__" "$(_w_tmux_name 'a;b#{session_id}c##')"
+  assert_eq "_w_tmux_dir doubles # and ends a trailing ; with /" "/x/issue##S;/" "$(_w_tmux_dir '/x/issue#S;')"
+  assert_eq "_w_tmux_dir keeps a plain dir" "/x/plain dir;x" "$(_w_tmux_dir '/x/plain dir;x')"
   assert_eq "_w_session_name default" "my_repo-fix-v1_2" "$(_w_session_name /x/my.repo fix/v1.2)"
   assert_eq "_w_session_name override made tmux-safe" "my_session_1" \
     "$(_w_session_name /x/repo b 'my.session:1')"

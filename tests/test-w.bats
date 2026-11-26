@@ -8,6 +8,14 @@ setup_file() {
   export REPO_ROOT
   # The real tmux (if any), captured before a test puts a fake one on PATH,
   # so teardown can always stop the test's private tmux server.
+  # WORKTREE_TEST_TMUX=<path> (make test-tmux TMUX_BIN=...) puts that tmux
+  # first on PATH as `tmux`, for w.sh and for the tests alike.
+  if [ -n "${WORKTREE_TEST_TMUX:-}" ]; then
+    mkdir -p "$BATS_FILE_TMPDIR/tmux-bin"
+    ln -sf "$WORKTREE_TEST_TMUX" "$BATS_FILE_TMPDIR/tmux-bin/tmux"
+    PATH="$BATS_FILE_TMPDIR/tmux-bin:$PATH"
+    export PATH
+  fi
   REAL_TMUX="$(command -v tmux 2>/dev/null || true)"
   export REAL_TMUX
 }
@@ -581,6 +589,17 @@ _tmux_session() {
   "$REAL_TMUX" new-session -d -s "$1" </dev/null >/dev/null 2>&1 3>&-
 }
 
+# Skip a real-tmux test when tmux is missing; with WORKTREE_TEST_REQUIRE_TMUX=1
+# (make test-tmux, the CI tmux matrix) a missing tmux fails it instead.
+_need_tmux() {
+  [ -n "$REAL_TMUX" ] && return 0
+  if [ "${WORKTREE_TEST_REQUIRE_TMUX:-}" = 1 ]; then
+    echo "tmux not installed (WORKTREE_TEST_REQUIRE_TMUX=1)" >&2
+    return 1
+  fi
+  skip "tmux not installed"
+}
+
 _tmux_has() {
   "$REAL_TMUX" has-session -t "=$1" </dev/null >/dev/null 2>&1 3>&-
 }
@@ -604,7 +623,7 @@ FAKE
 }
 
 @test "tmux exact: w rm does not kill a session that only starts with the name" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
   _tmux_session repo-foo-bar
@@ -615,7 +634,7 @@ FAKE
 }
 
 @test "tmux exact: w rm kills its own session and leaves the longer one" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
   _tmux_session repo-foo-bar
@@ -628,7 +647,7 @@ FAKE
 }
 
 @test "tmux exact: w dev does not attach a session that only starts with the name" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   _write_dev_toml
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
@@ -647,7 +666,7 @@ FAKE
 }
 
 @test "tmux exact: w dev reattaches its own session, not the longer one" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   _write_dev_toml
   cd "$REPO"
   worktree add foo >/dev/null 2>&1
@@ -673,13 +692,24 @@ FAKE
   [ "$(_w_tmux_name 'plain-name_09 ok')" = "plain-name_09 ok" ]
 }
 
+@test "tmux names: _w_tmux_name maps # (a tmux format) and ; (a tmux command separator) to _" {
+  [ "$(_w_tmux_name 'issue#S;')" = "issue_S_" ]
+  [ "$(_w_tmux_name 'a;b#{session_id}c##')" = "a_b_{session_id}c__" ]
+}
+
+@test "tmux names: _w_tmux_dir escapes a -c directory tmux would expand or split" {
+  [ "$(_w_tmux_dir '/x/issue#S;')" = "/x/issue##S;/" ]
+  [ "$(_w_tmux_dir '/x/a##b#{host}')" = "/x/a####b##{host}" ]
+  [ "$(_w_tmux_dir '/x/plain dir;x')" = "/x/plain dir;x" ]
+}
+
 @test "tmux names: the session override is made tmux-safe too" {
   [ "$(_w_session_name /x/my.repo fix/v1.2)" = "my_repo-fix-v1_2" ]
   [ "$(_w_session_name /x/repo b 'my.session:1')" = "my_session_1" ]
 }
 
 @test "tmux names: w dev and w rm work with . and : in the repo and . in the branch" {
-  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _need_tmux
   local r="$TEST_DIR/my.re:po" s="my_re_po-fix-v1_2"
   git clone -q "$TEST_DIR/remote.git" "$r"
   REPO="$r" _write_dev_toml
@@ -705,6 +735,41 @@ FAKE
   [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
 
   run $W_SH -c "echo fix/v1.2 | (. '$REPO_ROOT/w.sh' && cd '$r' && worktree rm fix/v1.2 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has "$s"
+  [ "$status" -ne 0 ]
+}
+
+# tmux expands formats (#S, #{...}, ##) in a new session's name (2.9a and
+# later; 3.8 also drops a trailing #) and in -c directories, and takes an
+# argument ending in ; as a command separator: such a branch got a session no
+# target names, started in the wrong directory.
+@test "tmux names: w dev and w rm work with # and ; in the branch" {
+  _need_tmux
+  local b='issue#S;' s="repo-issue_S_"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add "$b" >/dev/null 2>&1
+  [ -d "$WTS/$b" ]
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/$b"
+
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-sessions -F '#{session_name}' 3>&-)" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+  # both windows' shells start in the worktree, not a format-expanded path
+  [ "$("$REAL_TMUX" list-panes -s -t "=$s" -F '#{pane_current_path}' 3>&- | sort -u)" = "$WTS/$b" ]
+
+  : > "$TEST_DIR/attach.log"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to $s"* ]]
+  [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+
+  run $W_SH -c "echo '$b' | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm '$b' 2>&1)"
   [ "$status" -eq 0 ]
   run _tmux_has "$s"
   [ "$status" -ne 0 ]

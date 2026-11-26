@@ -21,6 +21,7 @@ help:
 	@echo "  test    run the BATS and zsh test suites"
 	@echo "  shells  run the BATS suites with the code under test in each shell in SHELLS"
 	@echo "          (default \"$(SHELLS)\"; a missing shell is skipped, a failure with CI=true or REQUIRE_SHELLS=\"busybox dash\")"
+	@echo "  test-tmux  run only the real-tmux tests, with TMUX_BIN (default tmux on PATH); never skipped"
 	@echo "  lint    shellcheck the scripts and the bats suites"
 	@echo "  demo    regenerate $(DEMO_GIF) via VHS"
 	@echo "  check   lint + test"
@@ -64,6 +65,16 @@ shells:
 	done; \
 	if [ -n "$$failed" ]; then echo "shells: FAILED:$$failed" >&2; exit 1; fi; \
 	echo "shells: all passed ($${ran:-none ran: every listed shell was skipped})"
+
+# Only the tests that drive a real tmux (named "tmux exact:" and "tmux names:"), with TMUX_BIN first on PATH as
+# `tmux` and WORKTREE_TEST_REQUIRE_TMUX=1, so a missing tmux fails instead of skipping. CI runs it once per tmux
+# version it tests.
+TMUX_BIN   ?= tmux
+.PHONY: test-tmux
+test-tmux:
+	@t=$$(command -v "$(TMUX_BIN)") || { echo "test-tmux: $(TMUX_BIN) not found" >&2; exit 1; }; \
+	echo "== tmux tests with $$t ($$("$$t" -V))"; \
+	WORKTREE_TEST_TMUX="$$t" WORKTREE_TEST_REQUIRE_TMUX=1 $(BATS) -f '^tmux (exact|names):' tests/test-w.bats
 
 .PHONY: demo
 demo:
