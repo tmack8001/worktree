@@ -6,6 +6,13 @@ its tag.
 
 ## [Unreleased]
 
+### Changed
+
+- GitHub Actions moved to their latest releases, pinned by full commit SHA: `actions/checkout` v7.0.1,
+  `actions/upload-artifact` v7.0.2, `actions/download-artifact` v8.0.2, `actions/attest-build-provenance` v4.2.2
+  (each SHA is the commit its tag points to; every input the workflows use still exists in the action). Not yet run
+  on GitHub.
+
 ### Added
 
 - README "Supported environments": POSIX sh and bash 3.2+ (the macOS system bash) for `w.sh`, zsh 5.x for
