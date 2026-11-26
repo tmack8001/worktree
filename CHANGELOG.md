@@ -8,20 +8,49 @@ its tag.
 
 ### Added
 
-- README "Supported environments": POSIX sh and bash 3.2+ for `w.sh`, zsh 5.x for `w.zsh`, macOS 14+, Ubuntu LTS
-  (22.04, 24.04), tmux 2.1+, each with what tests it and where; native Windows and Intel macOS are not covered.
+- README "Supported environments": POSIX sh and bash 3.2+ (the macOS system bash) for `w.sh`, zsh 5.x for
+  `w.zsh`, macOS 15+, Ubuntu 24.04 LTS and newer, tmux 2.1+, git 2.31+ (not verified at that floor), each with
+  what tests it and where; native Windows, Intel macOS and other distributions are not covered.
 - `make shells`: the bats suites with `w.sh`, `install.sh` and `scripts/build-release.sh` run under each shell in
   `SHELLS` (default dash, `bash --posix`, busybox ash, bash) through `TEST_SH`, as in ghid; bats itself runs under
   bash. A missing shell is skipped, and fails with `CI=true` or `REQUIRE_SHELLS`. `make test` is unchanged.
 - `make test-tmux TMUX_BIN=<tmux>`: only the tests that drive a real tmux, failing (not skipping) when tmux is
   missing. tmux 2.1, 2.2, 2.6, 2.9a, 3.0a, 3.2a, 3.3a, 3.4, 3.5a and 3.8 pass; 1.9a and 2.0 fail (no `=name`
   exact targets), hence the 2.1 floor.
-- CI jobs `shells` (ubuntu-22.04, ubuntu-24.04), `shells-macos` (macos-14, macos-latest: `/bin/sh`, `/bin/bash`
+- CI jobs `shells` (ubuntu-24.04, ubuntu-latest), `shells-macos` (macos-15, macos-latest: `/bin/sh`, `/bin/bash`
   3.2, `/bin/bash --posix`, dash, and the zsh suite) and `tmux` (2.1 built from source by
-  `scripts/build-tmux.sh` with a pinned SHA-256, the Ubuntu 22.04 and 24.04 packages, Homebrew's tmux).
+  `scripts/build-tmux.sh` with a pinned SHA-256, the Ubuntu 24.04 and ubuntu-latest packages, Homebrew's tmux).
+  macOS 14 and Ubuntu 22.04 are not in the support floor or the CI matrix: GitHub retired the macos-14 runner
+  image on 2026-11-02 and Apple no longer supports macOS 14; the ubuntu-22.04 image is deprecated (unsupported
+  from 2027-04-17). The tmux 2.1 build keeps the old-tmux floor tested on any runner.
 
 ### Fixed
 
+- `w.sh`: `worktree` no longer leaves a `w-cd.*` file in `$TMPDIR` when it is killed mid-run. The file that
+  carries the directory to `cd` into out of the command's subshell is now opened (to write on fd 9, to read back
+  on fd 8) and removed before the command starts, so it has no name while the command runs; no trap is set and
+  the caller's traps and fds 8 and 9 are kept. A pipe was not used because it would wait for every process that
+  inherits it (a tmux server started by `w dev`, a detached `git gc`, a background setup command). `w dev`
+  starts tmux with fd 9 closed. `w.zsh` runs in the caller's shell and never used such a file.
+- `w dev` sends each window's `run` command to that window, and selects the `shell` window, by the window id
+  tmux prints when it creates the window (`new-session`/`new-window -P -F '#{window_id}'`, targets `@N`) instead
+  of `=session:name`. A window name containing `.` (a pane separator in a target) got no command, and a name
+  repeating another window's (e.g. a second `shell`) could get the wrong one. Window names are kept as written.
+  Checked with tmux 2.1, 3.4 and 3.8 (`w.sh`, `w.zsh`).
+- `w rm` kills the tmux session named by the matched profile's `session` override, looked up in
+  `.worktree.toml` the same way as `w dev` (one helper, `_w_profile_session_name`). Before, it always killed
+  `<repo>-<branch>`, so it left the session `w dev` had made and could kill an unrelated session that had the
+  default name (`w.sh`, `w.zsh`).
+- `w cd <branch>`, `w <branch>` and `w add <branch>` take an existing branch's worktree from
+  `git worktree list --porcelain` (as `w rm` and `w dev` do) instead of assuming `<worktrees>/<branch>`. Before,
+  `w cd` failed for a worktree in a directory not named after its branch and went into a directory of the
+  branch's name that had another branch (or none) checked out; `w <branch>` and `w add` then tried to create a
+  second checkout, which git refuses, and the main working tree's branch (e.g. `w main` from a worktree) failed
+  in `git worktree add`. Now a branch checked out in a worktree switches there, one checked out in the main
+  working tree switches to it (saying so), and one git lists in a missing or unusable worktree fails with a
+  message naming that path. `w cd` of a branch with no worktree fails with "No worktree has branch '<branch>'
+  checked out". Only a branch with no worktree gets a new one at `<worktrees>/<branch>`, and `w add`/`w <branch>`
+  now refuse to create it when that path already exists (`w.sh`, `w.zsh`).
 - A branch (or `session` override) containing `#` or `;` now gets a tmux session that `w dev` and `w rm` find:
   tmux expands formats such as `#S`, `#{...}` and `##` in a new session's name (2.9a and later; 3.8 also drops a
   trailing `#`) and takes an argument ending in `;` as a command separator, so `w dev` created a new session

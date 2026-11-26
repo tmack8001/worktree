@@ -87,8 +87,10 @@ _w_worktree_branch() {
 # branch name: a worktree's directory need not match its branch). The path is
 # checked to be a worktree of the same repository with that branch checked
 # out, and printed physical (symlinks resolved).
-# Fails with 1 when no worktree has the branch, and with 2 (printing its path)
-# when only the main working tree has it.
+# Fails with 1 when no worktree has the branch, with 2 (printing its path)
+# when only the main working tree has it, and with 3 (printing the path git
+# records) when git lists the branch in a worktree that is missing or fails
+# those checks (e.g. a deleted directory not yet pruned).
 _w_branch_worktree_path() {
   local repo="$1" branch="$2" wt top common rc=0
   wt=$(git -C "$repo" worktree list --porcelain 2>/dev/null | W_REF="refs/heads/$branch" awk '
@@ -96,13 +98,37 @@ _w_branch_worktree_path() {
     $0 == "branch " ENVIRON["W_REF"] { print wt; rc = (n == 1) ? 2 : 0; found = 1; exit }
     END { if (!found) exit 1; exit rc }') || rc=$?
   (( rc == 0 )) || { printf '%s' "$wt"; return $rc; }
-  [[ -n "$wt" && -d "$wt" ]] || return 1
-  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [[ "$(cd "$top" && pwd -P)" == "$(cd "$wt" && pwd -P)" ]] || return 1
-  [[ "$(_w_worktree_branch "$wt")" == "$branch" ]] || return 1
-  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [[ "$(cd "$common" && pwd -P)" == "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ]] || return 1
+  [[ -n "$wt" && -d "$wt" ]] || { printf '%s' "$wt"; return 3; }
+  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || { printf '%s' "$wt"; return 3; }
+  [[ "$(cd "$top" && pwd -P)" == "$(cd "$wt" && pwd -P)" ]] || { printf '%s' "$wt"; return 3; }
+  [[ "$(_w_worktree_branch "$wt")" == "$branch" ]] || { printf '%s' "$wt"; return 3; }
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { printf '%s' "$wt"; return 3; }
+  [[ "$(cd "$common" && pwd -P)" == "$(cd "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ]] || { printf '%s' "$wt"; return 3; }
   (cd "$wt" && pwd -P)
+}
+
+# Find the worktree for an EXISTING checkout of branch $2 in repo $1, for
+# commands that switch to it (w cd, w <branch>, w add). Prints the directory
+# and succeeds when git has the branch checked out in a worktree or in the
+# main working tree (saying so for the latter). Fails with 1, printing
+# nothing, when no worktree has it (the caller may then create one), and with
+# 3 after printing why to stderr when git lists it somewhere unusable.
+_w_switch_target() {
+  local dest rc=0
+  dest=$(_w_branch_worktree_path "$1" "$2") || rc=$?
+  case $rc in
+    0) printf '%s' "$dest" ;;
+    2) if [[ -d "$dest" ]]; then
+         echo "↩️  Branch '$2' is checked out in the main working tree — switching to $dest" >&2
+         printf '%s' "$dest"
+       else
+         echo "Branch '$2' is checked out in the main working tree ($dest), which is not a directory" >&2
+         return 3
+       fi ;;
+    1) return 1 ;;
+    *) echo "git lists branch '$2' as checked out in $dest, which is not a usable worktree of this repository (see: git worktree list; git worktree prune)" >&2
+       return 3 ;;
+  esac
 }
 
 # ── tmux session names ─────────────────────────────────────────────
@@ -139,6 +165,17 @@ _w_session_name() {
   local repo="$1" branch="$2" name="${3:-}"
   [[ -n "$name" ]] || name="${repo:t}-${branch//\//-}"
   _w_tmux_name "$name"
+}
+
+# The session `w dev` uses for branch $2 of repo $1: the `session` of the
+# profile .worktree.toml matches for the branch (the same lookup as w dev),
+# else the default. w dev and w rm both use this, so w rm kills the session
+# w dev made. Runs in a subshell so the caller's loaded config is untouched.
+_w_profile_session_name() {
+  (
+    _w_load_config "$1/.worktree.toml" "$2" >/dev/null 2>&1 || W_PROFILE=()
+    _w_session_name "$1" "$2" "${W_PROFILE[session]:-}"
+  )
 }
 
 # ── GitHub URL resolution ──────────────────────────────────────────
@@ -597,7 +634,7 @@ _w_dev() {
   }
 
   local session_name
-  session_name=$(_w_session_name "$repo" "$branch" "${W_PROFILE[session]:-}")
+  session_name=$(_w_profile_session_name "$repo" "$branch")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
@@ -626,8 +663,15 @@ _w_dev() {
     _w_repo_commands_skipped window "${W_WINDOW_CMDS[@]}"
   fi
 
-  # Window 0: shell
-  tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell"
+  # Window 0: shell. Every window is targeted by the id tmux prints for it
+  # (@N), never by name: a name from .worktree.toml may contain '.' or ':',
+  # which split a `session:window.pane` target, or repeat another window's.
+  local shell_id
+  shell_id=$(tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell" -P -F '#{window_id}')
+  if [[ "$shell_id" != @* ]]; then
+    echo "  ❌ tmux did not report the new session's window — aborting session"
+    return 1
+  fi
 
   local i
   for (( i = 1; i <= ${#W_WINDOW_NAMES[@]}; i++ )); do
@@ -641,13 +685,16 @@ _w_dev() {
     wdir="${wdir:-$dest}"
 
     echo "  🪟 $wname"
-    tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")"
-    if [[ -n "$wcmd" ]] && (( allow )); then
-      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
+    local wid
+    wid=$(tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")" -P -F '#{window_id}')
+    if [[ "$wid" != @* ]]; then
+      echo "  ⚠️  tmux did not report window $wname: its command is not sent"
+    elif [[ -n "$wcmd" ]] && (( allow )); then
+      tmux send-keys -t "$wid" "$wcmd" Enter
     fi
   done
 
-  tmux select-window -t "=${session_name}:shell"
+  tmux select-window -t "$shell_id"
   tmux attach-session -t "=$session_name"
 }
 
@@ -688,7 +735,7 @@ worktree() {
     add)      _w_add "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     rm)       _w_rm "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     ls)       _w_ls "$W_MAIN_REPO" "${2:-}" ;;
-    cd)       _w_cd "$W_WORKTREES_DIR" "${2:-}" ;;
+    cd)       _w_cd "$W_MAIN_REPO" "${2:-}" ;;
     dev)      _w_dev_cmd "$W_MAIN_REPO" "$W_WORKTREES_DIR" "${2:-}" ;;
     "")       _w_fzf "$W_MAIN_REPO" "$W_WORKTREES_DIR" ;;
     *)        _w_go "$W_MAIN_REPO" "$W_WORKTREES_DIR" "$1" ;;
@@ -804,13 +851,15 @@ _w_go() {
     return 1
   fi
 
-  # If the worktree exists, cd into it; otherwise create it
-  local dest="$wtdir/$branch"
-  if [[ -d "$dest" ]]; then
-    cd "$dest"
-  else
-    _w_add "$repo" "$wtdir" "$branch"
-  fi
+  # An existing checkout of the branch is wherever git has it; only a branch
+  # with no worktree gets a new one (from _w_add).
+  local dest rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) cd "$dest" ;;
+    1) _w_add "$repo" "$wtdir" "$branch" ;;
+    *) return 1 ;;
+  esac
 }
 
 _w_add() {
@@ -837,7 +886,8 @@ Create a new worktree and cd into it.
 The worktree is created at ../<repo>-worktrees/<branch> relative to the
 main repository.
 
-If the worktree already exists, just cd's into it.
+If the branch is already checked out (in a worktree wherever its directory
+is, or in the main working tree), just cd's into it.
 
 If a .worktree.toml exists, the matching profile's setup commands run
 after creation ONLY when WORKTREE_ALLOW_REPO_COMMANDS=1 is set; otherwise
@@ -870,12 +920,25 @@ EOF
     return 1
   fi
 
-  local dest="$wtdir/$branch"
+  # git refuses to check one branch out twice: if it is checked out already
+  # (in a worktree wherever it is, or in the main working tree), switch there.
+  local dest rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
+       cd "$dest"
+       return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
 
-  if [[ -d "$dest" ]]; then
-    echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
-    cd "$dest"
-    return 0
+  # No worktree has the branch: create one at <worktrees>/<branch>, but never
+  # in a path that is already taken (by another branch's worktree or anything
+  # else).
+  dest="$wtdir/$branch"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    echo "$dest already exists but does not have branch '$branch' checked out: not creating a worktree there"
+    return 1
   fi
 
   mkdir -p "$wtdir"
@@ -1083,10 +1146,11 @@ EOF
     return 1
   fi
 
-  # Kill tmux session if one exists for this worktree
-  local session_guess
-  session_guess=$(_w_session_name "$repo" "$branch")
-  tmux kill-session -t "=$session_guess" 2>/dev/null
+  # The session w dev made for this branch (profile `session` override
+  # included).
+  local session_name
+  session_name=$(_w_profile_session_name "$repo" "$branch")
+  tmux kill-session -t "=$session_name" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).
   [[ "${PWD:A}" == "$dest" || "${PWD:A}" == "$dest"/* ]] && cd "$repo"
@@ -1098,7 +1162,7 @@ EOF
 }
 
 _w_cd() {
-  local wtdir="$1" branch="$2"
+  local repo="$1" branch="$2"
 
   if [[ "$branch" == "--help" || "$branch" == "-h" ]]; then
     cat <<'EOF'
@@ -1111,13 +1175,15 @@ EOF
 
   [[ -z "$branch" ]] && { echo "usage: w cd <branch> (see w cd --help)"; return 1; }
 
-  local dest="$wtdir/$branch"
-  if [[ -d "$dest" ]]; then
-    cd "$dest"
-  else
-    echo "No worktree at $dest"
-    return 1
-  fi
+  # The worktree git has the branch checked out in, wherever it is.
+  local dest rc=0
+  dest=$(_w_switch_target "$repo" "$branch") || rc=$?
+  case $rc in
+    0) cd "$dest" ;;
+    1) echo "No worktree has branch '$branch' checked out (see: worktree ls)"
+       return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 _w_ls() {

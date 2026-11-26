@@ -265,12 +265,17 @@ TOML
 
 # ── repo-command opt-in (dev: pre + window commands) ───────────────
 
+# Logs each call; like tmux, new-session and new-window with -P print an id
+# (@0, @1, ...) for the window they create.
 _fake_tmux() {
   mkdir -p "$TEST_DIR/bin"
   cat > "$TEST_DIR/bin/tmux" <<FAKE
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TEST_DIR/tmux.log"
 [ "\$1" = has-session ] && exit 1
+case " \$* " in
+  *" -P "*) n=\$(grep -c -- ' -P ' "$TEST_DIR/tmux.log"); echo "@\$((n - 1))" ;;
+esac
 exit 0
 FAKE
   chmod +x "$TEST_DIR/bin/tmux"
@@ -376,6 +381,122 @@ TOML
   run worktree cd nonexistent
   [ "$status" -ne 0 ]
   [[ "$output" == *"No worktree"* ]]
+}
+
+# An existing branch's worktree is found with git (`git worktree list`),
+# never assumed to be <worktrees>/<branch>.
+
+@test "w cd <branch>: goes to the worktree git has the slash branch in, whatever its directory" {
+  git -C "$REPO" worktree add -q -b feature/cdflat "$WTS/cd-flat"
+  cd "$REPO"
+  worktree cd feature/cdflat
+  [ "$(pwd -P)" = "$WTS/cd-flat" ]
+}
+
+@test "w cd <branch>: never goes to a directory only because it has the branch's name" {
+  # $WTS/foo holds branch bar; branch foo lives in $WTS/other
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" worktree add -q -b foo "$WTS/other"
+  cd "$REPO"
+  worktree cd foo
+  [ "$(pwd -P)" = "$WTS/other" ]
+}
+
+@test "w cd <branch>: the main working tree's branch goes to the main working tree" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree cd main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  worktree cd main 2>/dev/null
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w cd <branch>: a branch with no worktree fails closed, even with a directory of its name" {
+  git -C "$REPO" branch lonely
+  mkdir -p "$WTS/lonely"
+  cd "$REPO"
+  run worktree cd lonely
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree has branch 'lonely' checked out"* ]]
+  worktree cd lonely >/dev/null 2>&1 || true
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w cd <branch>: a worktree git lists but whose directory is gone fails closed" {
+  git -C "$REPO" worktree add -q -b gone "$WTS/gone-dir"
+  rm -rf "$WTS/gone-dir"
+  cd "$REPO"
+  run worktree cd gone
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"git lists branch 'gone' as checked out in $WTS/gone-dir, which is not a usable worktree"* ]]
+}
+
+@test "w <branch>: switches to the worktree git has the branch in instead of creating another" {
+  git -C "$REPO" worktree add -q -b feature/goflat "$WTS/go-flat"
+  cd "$REPO"
+  run worktree feature/goflat
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Creating worktree"* ]]
+  [ ! -e "$WTS/feature/goflat" ]
+  worktree feature/goflat >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/go-flat" ]
+}
+
+@test "w <branch>: the main working tree's branch switches there, no worktree is created" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  [[ "$output" != *"Creating worktree"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/main" ]
+  worktree main >/dev/null 2>&1
+  [ "$(pwd -P)" = "$REPO" ]
+}
+
+@test "w <branch>: an existing branch with no worktree gets a new one under the worktrees dir" {
+  git -C "$REPO" branch feature/fresh
+  cd "$REPO"
+  worktree feature/fresh >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/feature/fresh" ]
+  [ "$(git -C "$WTS/feature/fresh" symbolic-ref HEAD)" = "refs/heads/feature/fresh" ]
+}
+
+@test "w add <branch>: a branch checked out elsewhere switches there instead of failing" {
+  git -C "$REPO" worktree add -q -b feature/addflat "$WTS/add-flat"
+  cd "$REPO"
+  run worktree add feature/addflat
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Already exists"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/feature/addflat" ]
+  worktree add feature/addflat >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/add-flat" ]
+}
+
+@test "w add <branch>: the main working tree's branch switches there" {
+  git -C "$REPO" worktree add -q -b side "$WTS/side"
+  cd "$WTS/side"
+  run worktree add main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked out in the main working tree"* ]]
+  [[ "$output" != *"fatal"* ]]
+  [ ! -e "$WTS/main" ]
+  [ "$(git -C "$REPO" worktree list --porcelain | grep -c '^worktree ')" = "2" ]
+}
+
+@test "w add <branch>: never uses a directory of the branch's name that has another branch" {
+  git -C "$REPO" worktree add -q -b bar "$WTS/foo"
+  git -C "$REPO" branch foo
+  cd "$REPO"
+  run worktree add foo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$WTS/foo already exists but does not have branch 'foo' checked out"* ]]
+  [ "$(git -C "$WTS/foo" symbolic-ref HEAD)" = "refs/heads/bar" ]
+  worktree add foo >/dev/null 2>&1 || true
+  [ "$(pwd -P)" = "$REPO" ]
 }
 
 # ── worktree ls ────────────────────────────────────────────────────
@@ -773,6 +894,111 @@ FAKE
   [ "$status" -eq 0 ]
   run _tmux_has "$s"
   [ "$status" -ne 0 ]
+}
+
+# The pane text of the window named $2 in session $1, once it shows $3 (polled
+# for up to 10s: the window's shell runs the typed command when it starts);
+# with no $3, as it is now.
+_window_text() {
+  local id='' n=0 text=''
+  # one window per line: its id, a space, its name (tmux escapes a tab in -F)
+  id=$("$REAL_TMUX" list-windows -t "=$1" -F '#{window_id} #{window_name}' 3>&- |
+    awk -v n="$2" '{ id = $1; sub(/^[^ ]* /, ""); if ($0 == n) print id }')
+  [ -n "$id" ] || return 1
+  while [ "$n" -lt 50 ]; do
+    text=$("$REAL_TMUX" capture-pane -p -t "$id" 3>&-)
+    case "$text" in *"${3:-}"*) break ;; esac
+    sleep 0.2; n=$((n + 1))
+  done
+  printf '%s' "$text"
+}
+
+# A window name with '.' (a pane separator) or ':' (a session separator) broke
+# `=session:name` targets, so its command went nowhere; windows are now
+# targeted by the id tmux prints when it creates them.
+@test "tmux names: w dev sends each window's command to that window, whatever its name" {
+  _need_tmux
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "a.b"
+run = "echo A1""MARK"
+
+[[profile.default.windows]]
+name = "c:d"
+run = "echo C2""MARK"
+
+[[profile.default.windows]]
+name = "plain"
+run = "echo P3""MARK"
+TOML
+  cd "$REPO"
+  worktree add winnames >/dev/null 2>&1
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  # the windows' shells: plain sh with no profile, so only the typed commands run
+  mkdir -p "$TEST_DIR/home"
+  export SHELL=/bin/sh HOME="$TEST_DIR/home" ENV=
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  cd "$WTS/winnames"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  local s=repo-winnames t
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell a.b c:d plain " ]
+  # the shell window is selected
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#{window_active}#W' 3>&- | grep '^1')" = "1shell" ]
+
+  t=$(_window_text "$s" a.b A1MARK)
+  [[ "$t" == *A1MARK* ]]
+  [[ "$t" != *C2* && "$t" != *P3* ]]
+  t=$(_window_text "$s" c:d C2MARK)
+  [[ "$t" == *C2MARK* ]]
+  [[ "$t" != *A1* && "$t" != *P3* ]]
+  t=$(_window_text "$s" plain P3MARK)
+  [[ "$t" == *P3MARK* ]]
+  [[ "$t" != *A1* && "$t" != *C2* ]]
+  # checked last, after the other windows' commands have run
+  t=$(_window_text "$s" shell)
+  [[ "$t" != *A1* && "$t" != *C2* && "$t" != *P3* ]]
+}
+
+# A profile's `session` override names the session w dev makes; w rm must
+# look it up the same way and kill that session, not the default name.
+@test "tmux names: w rm kills the session a profile's session override names, and only it" {
+  _need_tmux
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.fe]
+branches = "fe/*"
+session = "custom.sess"
+
+[[profile.fe.windows]]
+name = "server"
+
+[profile.default]
+branches = "*"
+TOML
+  cd "$REPO"
+  worktree add fe/login >/dev/null 2>&1
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/fe/login"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "custom_sess" ]
+  # the default name and a longer name next to it must survive w rm
+  _tmux_session repo-fe-login
+  _tmux_session custom_sess-2
+  cd "$REPO"
+  run $W_SH -c "echo fe/login | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm fe/login 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/fe/login" ]
+  run _tmux_has custom_sess
+  [ "$status" -ne 0 ]
+  _tmux_has repo-fe-login
+  _tmux_has custom_sess-2
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -1344,6 +1570,71 @@ _cfg_dir_count() {
   [ -d "$WTS/cfg-missing" ]
   [ "$(_cfg_dir_count)" = "0" ]
   [ -z "${W_CFG_PROFILE:-}" ]
+}
+
+# ── worktree's cd result file ──────────────────────────────────────
+#
+# w.sh passes the directory to cd into out of its subshell through a w-cd.*
+# temp file, which used to stay in $TMPDIR when worktree was killed mid-run.
+
+_cd_file_count() {
+  find "$TMPDIR" -maxdepth 1 -name 'w-cd.*' | wc -l | tr -d ' '
+}
+
+@test "w-cd: worktree leaves no w-cd file after a cd or a failure" {
+  _private_tmpdir
+  cd "$REPO"
+  worktree add cdfile >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/cdfile" ]
+  cd "$REPO"
+  worktree cd cdfile >/dev/null 2>&1
+  [ "$(pwd -P)" = "$WTS/cdfile" ]
+  run worktree cd no-such-branch
+  [ "$status" -eq 1 ]
+  [ "$(_cd_file_count)" = "0" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "w-cd: worktree keeps the caller's traps and its fds 8 and 9" {
+  _private_tmpdir
+  cd "$REPO"
+  worktree add cdfds >/dev/null 2>&1
+  run $W_SH -c '
+    . "$1"; cd "$2" || exit 1
+    trap "echo user-trap" USR1
+    before=$(trap)
+    exec 8>"$3/fd8" 9>"$3/fd9"
+    worktree cd cdfds || exit 1
+    [ "$(trap)" = "$before" ] || { echo "traps changed: $(trap)"; exit 1; }
+    echo eight >&8; echo nine >&9
+    pwd -P' sh "$REPO_ROOT/w.sh" "$REPO" "$TEST_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$WTS/cdfds" ]
+  [ "$(cat "$TEST_DIR/fd8")" = "eight" ]
+  [ "$(cat "$TEST_DIR/fd9")" = "nine" ]
+  [ "$(_cd_file_count)" = "0" ]
+}
+
+@test "w-cd: worktree killed with TERM mid-run leaves no w-cd file" {
+  _private_tmpdir
+  # a setup command that signals it has started, then waits to be released
+  cat > "$REPO/.worktree.toml" <<TOML
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch '$TEST_DIR/started'; while [ ! -e '$TEST_DIR/release' ]; do sleep 1; done"
+TOML
+  WORKTREE_ALLOW_REPO_COMMANDS=1 $W_SH -c '. "$1"; cd "$2" && worktree add killed' sh \
+    "$REPO_ROOT/w.sh" "$REPO" </dev/null >/dev/null 2>&1 3>&- &
+  local pid=$! n=0
+  while [ ! -e "$TEST_DIR/started" ] && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+  [ -e "$TEST_DIR/started" ]
+  kill -0 "$pid"                    # still running: the kill lands mid-run
+  kill -TERM "$pid"
+  wait "$pid" || true
+  touch "$TEST_DIR/release"         # let the orphaned setup command finish
+  [ "$(_cd_file_count)" = "0" ]
 }
 
 # ── TOML config parser ─────────────────────────────────────────────

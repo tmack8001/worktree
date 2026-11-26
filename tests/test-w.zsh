@@ -509,6 +509,122 @@ TOML
   )
 }
 
+test_switch_from_git() {
+  echo "── w cd / w <branch> / w add: existing worktree found with git ──"
+  local repo
+  repo=$(setup_repo "swg")
+  local wts="$TEST_ROOT/swg-worktrees"
+  git -C "$repo" worktree add -q -b feature/cdflat "$wts/cd-flat"
+  git -C "$repo" worktree add -q -b bar "$wts/foo"
+  git -C "$repo" worktree add -q -b foo "$wts/other"
+  git -C "$repo" branch lonely
+  mkdir -p "$wts/lonely"
+  git -C "$repo" worktree add -q -b gone "$wts/gone-dir"
+  rm -rf "$wts/gone-dir"
+
+  (
+    local output rc
+    cd "$repo"
+    w cd feature/cdflat
+    assert_eq "cd <slash branch> goes to the dir git has it in" "$wts/cd-flat" "$PWD"
+    cd "$repo"
+    w cd foo
+    assert_eq "cd foo goes to the worktree with branch foo, not the dir named foo" "$wts/other" "$PWD"
+    output=$(w cd main 2>&1); rc=$?
+    assert_exit_code "cd main succeeds" "0" "$rc"
+    assert_contains "cd main says it is the main working tree" "$output" "checked out in the main working tree"
+    w cd main 2>/dev/null
+    assert_eq "cd main goes to the main working tree" "$repo" "$PWD"
+    output=$(w cd lonely 2>&1); rc=$?
+    assert_exit_code "cd to a branch with no worktree fails" "1" "$rc"
+    assert_contains "cd says the branch has no worktree" "$output" "No worktree has branch 'lonely' checked out"
+    w cd lonely >/dev/null 2>&1
+    assert_eq "cd to a branch with no worktree stays put" "$repo" "$PWD"
+    output=$(w cd gone 2>&1); rc=$?
+    assert_exit_code "cd to a pruned-away worktree fails" "1" "$rc"
+    assert_contains "cd names the unusable worktree" "$output" \
+      "git lists branch 'gone' as checked out in $wts/gone-dir, which is not a usable worktree"
+  )
+
+  git -C "$repo" worktree add -q -b feature/goflat "$wts/go-flat"
+  git -C "$repo" branch feature/fresh
+  (
+    local output rc
+    cd "$repo"
+    output=$(w feature/goflat 2>&1); rc=$?
+    assert_exit_code "w <branch> elsewhere succeeds" "0" "$rc"
+    [[ "$output" != *"Creating worktree"* ]] && pass "w <branch> elsewhere creates nothing" \
+      || fail "w <branch> elsewhere created a worktree"
+    assert_dir_not_exists "w <branch> elsewhere makes no <worktrees>/<branch>" "$wts/feature/goflat"
+    w feature/goflat >/dev/null 2>&1
+    assert_eq "w <branch> goes to the dir git has it in" "$wts/go-flat" "$PWD"
+
+    cd "$wts/go-flat"
+    output=$(w main 2>&1); rc=$?
+    assert_exit_code "w main succeeds" "0" "$rc"
+    [[ "$output" != *"Creating worktree"* && "$output" != *fatal* ]] && pass "w main creates nothing" \
+      || fail "w main tried to create a worktree: $output"
+    assert_dir_not_exists "w main makes no <worktrees>/main" "$wts/main"
+    w main >/dev/null 2>&1
+    assert_eq "w main goes to the main working tree" "$repo" "$PWD"
+
+    w feature/fresh >/dev/null 2>&1
+    assert_eq "w <branch with no worktree> creates <worktrees>/<branch>" "$wts/feature/fresh" "$PWD"
+
+    cd "$repo"
+    output=$(w add feature/goflat 2>&1); rc=$?
+    assert_exit_code "add of a branch checked out elsewhere succeeds" "0" "$rc"
+    assert_contains "add says it already exists" "$output" "Already exists"
+    w add feature/goflat >/dev/null 2>&1
+    assert_eq "add switches to the dir git has it in" "$wts/go-flat" "$PWD"
+
+    output=$(w add main 2>&1); rc=$?
+    assert_exit_code "add main succeeds" "0" "$rc"
+    [[ "$output" != *fatal* ]] && pass "add main does not fail in git" || fail "add main: $output"
+    assert_dir_not_exists "add main makes no <worktrees>/main" "$wts/main"
+
+    cd "$repo"
+    git -C "$repo" worktree remove "$wts/other"
+    output=$(w add foo 2>&1); rc=$?
+    assert_exit_code "add foo with \$wts/foo holding bar fails" "1" "$rc"
+    assert_contains "add foo says the dir is taken" "$output" \
+      "$wts/foo already exists but does not have branch 'foo' checked out"
+    assert_eq "add foo leaves bar's worktree alone" "refs/heads/bar" "$(git -C "$wts/foo" symbolic-ref HEAD)"
+    w add foo >/dev/null 2>&1
+    assert_eq "add foo stays put" "$repo" "$PWD"
+  )
+}
+
+# w.zsh's worktree runs in the caller's shell and cd's directly: unlike w.sh
+# it needs no file to pass the directory out, and creates none, even killed.
+test_no_cd_temp_file() {
+  echo "── worktree creates no temp file (w.zsh) ──"
+  local repo
+  repo=$(setup_repo "nocd")
+  local tmp="$TEST_ROOT/nocd-tmp"
+  mkdir -p "$tmp"
+  cat > "$repo/.worktree.toml" <<TOML
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch '$TEST_ROOT/nocd-started'; while [ ! -e '$TEST_ROOT/nocd-release' ]; do sleep 1; done"
+TOML
+  (
+    cd "$repo"
+    TMPDIR="$tmp" w cd main >/dev/null 2>&1
+    assert_eq "w cd leaves TMPDIR empty" "" "$(ls -A "$tmp")"
+  )
+  WORKTREE_ALLOW_REPO_COMMANDS=1 TMPDIR="$tmp" zsh -c 'source "$1"; cd "$2" && worktree add killed' zsh \
+    "$SCRIPT_DIR/../w.zsh" "$repo" </dev/null >/dev/null 2>&1 &
+  local pid=$! n=0
+  while [[ ! -e "$TEST_ROOT/nocd-started" ]] && (( n < 100 )); do sleep 0.1; (( n++ )); done
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  touch "$TEST_ROOT/nocd-release"
+  assert_eq "worktree killed mid-run leaves TMPDIR empty" "" "$(ls -A "$tmp")"
+}
+
 test_dev_guess_from_worktree() {
   echo "── w dev (no branch: derived from the worktree) ──"
   local repo
@@ -1515,6 +1631,8 @@ TOML
   )
 }
 
+# Logs each call; like tmux, new-session and new-window with -P print an id
+# (@0, @1, ...) for the window they create.
 _zt_fake_tmux() {
   local bin="$1"
   mkdir -p "$bin"
@@ -1522,6 +1640,9 @@ _zt_fake_tmux() {
 #!/bin/sh
 printf '%s\n' "\$*" >> "$bin/tmux.log"
 [ "\$1" = has-session ] && exit 1
+case " \$* " in
+  *" -P "*) n=\$(grep -c -- ' -P ' "$bin/tmux.log"); echo "@\$((n - 1))" ;;
+esac
 exit 0
 FAKE
   chmod +x "$bin/tmux"
@@ -1739,6 +1860,133 @@ TOML
   "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
 }
 
+# The pane text of the window named $2 in session $1, once it shows $3 (polled
+# for up to 10s: the window's shell runs the typed command when it starts);
+# with no $3, as it is now.
+_zt_window_text() {
+  local id n=0 text
+  # one window per line: its id, a space, its name (tmux escapes a tab in -F)
+  id=$("$REAL_TMUX" list-windows -t "=$1" -F '#{window_id} #{window_name}' 2>/dev/null |
+    awk -v n="$2" '{ id = $1; sub(/^[^ ]* /, ""); if ($0 == n) print id }')
+  [[ -n "$id" ]] || return 1
+  while (( n < 50 )); do
+    text=$("$REAL_TMUX" capture-pane -p -t "$id" 2>/dev/null)
+    [[ "$text" == *"${3:-}"* ]] && break
+    sleep 0.2; (( n++ ))
+  done
+  print -r -- "$text"
+}
+
+# A window name with '.' (a pane separator) or ':' (a session separator) broke
+# `=session:name` targets, so its command went nowhere; windows are now
+# targeted by the id tmux prints when it creates them.
+test_tmux_window_names() {
+  echo "── tmux: window commands reach their window, whatever its name ──"
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+  local repo
+  repo=$(setup_repo "wn")
+  local wts="$TEST_ROOT/wn-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "a.b"
+run = "echo A1""MARK"
+
+[[profile.default.windows]]
+name = "c:d"
+run = "echo C2""MARK"
+
+[[profile.default.windows]]
+name = "plain"
+run = "echo P3""MARK"
+TOML
+  local bin="$TEST_ROOT/wn-bin" s=wn-winnames
+  _zt_attach_logging_tmux "$bin"
+  mkdir -p "$TEST_ROOT/wn-home"
+  (
+    cd "$repo"
+    w add winnames >/dev/null 2>&1
+    cd "$wts/winnames"
+    # the windows' shells: plain sh with no profile, so only the typed commands run
+    export SHELL=/bin/sh HOME="$TEST_ROOT/wn-home" ENV=
+    local output rc t
+    output=$(WORKTREE_ALLOW_REPO_COMMANDS=1 PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with . and : in window names succeeds" "0" "$rc"
+    assert_eq "dev attaches its session" "$s" "$(<"$bin/attach.log")"
+    assert_eq "window names are kept as written" "shell a.b c:d plain " \
+      "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 2>/dev/null | tr '\n' ' ')"
+    assert_eq "the shell window is selected" "1shell" \
+      "$("$REAL_TMUX" list-windows -t "=$s" -F '#{window_active}#W' 2>/dev/null | grep '^1')"
+    t=$(_zt_window_text "$s" a.b A1MARK)
+    [[ "$t" == *A1MARK* && "$t" != *C2* && "$t" != *P3* ]] && pass "a.b gets its own command" \
+      || fail "a.b pane: $t"
+    t=$(_zt_window_text "$s" c:d C2MARK)
+    [[ "$t" == *C2MARK* && "$t" != *A1* && "$t" != *P3* ]] && pass "c:d gets its own command" \
+      || fail "c:d pane: $t"
+    t=$(_zt_window_text "$s" plain P3MARK)
+    [[ "$t" == *P3MARK* && "$t" != *A1* && "$t" != *C2* ]] && pass "plain gets its own command" \
+      || fail "plain pane: $t"
+    t=$(_zt_window_text "$s" shell)
+    [[ "$t" != *A1* && "$t" != *C2* && "$t" != *P3* ]] && pass "the shell window gets no command" \
+      || fail "shell pane: $t"
+  )
+  "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
+}
+
+# A profile's `session` override names the session w dev makes; w rm must
+# look it up the same way and kill that session, not the default name.
+test_rm_session_override() {
+  echo "── tmux: w rm kills the profile's session override ──"
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+  local repo
+  repo=$(setup_repo "so")
+  local wts="$TEST_ROOT/so-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.fe]
+branches = "fe/*"
+session = "custom.sess"
+
+[[profile.fe.windows]]
+name = "server"
+
+[profile.default]
+branches = "*"
+TOML
+  local bin="$TEST_ROOT/so-bin"
+  _zt_attach_logging_tmux "$bin"
+  (
+    cd "$repo"
+    w add fe/login >/dev/null 2>&1
+    cd "$wts/fe/login"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with a session override succeeds" "0" "$rc"
+    assert_eq "dev attaches the override session" "custom_sess" "$(<"$bin/attach.log")"
+    _zt_tmux_session so-fe-login
+    _zt_tmux_session custom_sess-2
+    cd "$repo"
+    echo "fe/login" | w rm fe/login >/dev/null 2>&1
+    assert_dir_not_exists "rm removed the worktree" "$wts/fe/login"
+    _zt_tmux_has custom_sess && fail "rm left the override session custom_sess" \
+      || pass "rm kills the override session"
+    _zt_tmux_has so-fe-login && pass "rm keeps the session with the default name" \
+      || fail "rm killed so-fe-login instead of the override"
+    _zt_tmux_has custom_sess-2 && pass "rm keeps a longer session next to the override" \
+      || fail "rm killed custom_sess-2"
+  )
+  "$REAL_TMUX" kill-session -t "=so-fe-login" >/dev/null 2>&1
+  "$REAL_TMUX" kill-session -t "=custom_sess-2" >/dev/null 2>&1
+  "$REAL_TMUX" kill-session -t "=custom_sess" >/dev/null 2>&1
+}
+
 # ── gh command override ───────────────────────────────────────────
 
 _zt_fake_gh() {
@@ -1878,8 +2126,12 @@ test_setup_skipped_by_default
 test_dev_commands_gated
 test_dev_guess_from_worktree
 test_branch_arg_from_git
+test_switch_from_git
+test_no_cd_temp_file
 test_tmux_exact_match
 test_tmux_names
+test_tmux_window_names
+test_rm_session_override
 test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────
