@@ -6,7 +6,31 @@ its tag.
 
 ## [Unreleased]
 
+### Added
+
+- README "Supported environments": POSIX sh and bash 3.2+ for `w.sh`, zsh 5.x for `w.zsh`, macOS 14+, Ubuntu LTS
+  (22.04, 24.04), tmux 2.1+, each with what tests it and where; native Windows and Intel macOS are not covered.
+- `make shells`: the bats suites with `w.sh`, `install.sh` and `scripts/build-release.sh` run under each shell in
+  `SHELLS` (default dash, `bash --posix`, busybox ash, bash) through `TEST_SH`, as in ghid; bats itself runs under
+  bash. A missing shell is skipped, and fails with `CI=true` or `REQUIRE_SHELLS`. `make test` is unchanged.
+- `make test-tmux TMUX_BIN=<tmux>`: only the tests that drive a real tmux, failing (not skipping) when tmux is
+  missing. tmux 2.1, 2.2, 2.6, 2.9a, 3.0a, 3.2a, 3.3a, 3.4, 3.5a and 3.8 pass; 1.9a and 2.0 fail (no `=name`
+  exact targets), hence the 2.1 floor.
+- CI jobs `shells` (ubuntu-22.04, ubuntu-24.04), `shells-macos` (macos-14, macos-latest: `/bin/sh`, `/bin/bash`
+  3.2, `/bin/bash --posix`, dash, and the zsh suite) and `tmux` (2.1 built from source by
+  `scripts/build-tmux.sh` with a pinned SHA-256, the Ubuntu 22.04 and 24.04 packages, Homebrew's tmux).
+
 ### Fixed
+
+- A branch (or `session` override) containing `#` or `;` now gets a tmux session that `w dev` and `w rm` find:
+  tmux expands formats such as `#S`, `#{...}` and `##` in a new session's name (2.9a and later; 3.8 also drops a
+  trailing `#`) and takes an argument ending in `;` as a command separator, so `w dev` created a new session
+  every time and `w rm` never killed it. `#` and `;` now map to `_` like `.` and `:`; other session names are
+  unchanged. A session made for such a branch by an earlier version is not found by the new name
+  (`w.sh`, `w.zsh`).
+- tmux windows of `w dev` start in their directory when its path contains `#` or ends in `;`: tmux expands
+  formats in `-c` too (every version checked), so `#` is now doubled and a trailing `;` followed by `/`
+  (`w.sh`, `w.zsh`).
 
 - `w rm` and `w dev` without a branch, run inside a worktree, now take the branch git has checked out there
   (`git symbolic-ref HEAD` in the worktree found by `git rev-parse --show-toplevel`) instead of the first path
