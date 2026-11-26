@@ -14,7 +14,7 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "  test    run the BATS and zsh test suites"
-	@echo "  lint    shellcheck both shell variants"
+	@echo "  lint    shellcheck w.sh, install.sh and the bats suites"
 	@echo "  demo    regenerate $(DEMO_GIF) via VHS"
 	@echo "  check   lint + test"
 	@echo "  deps    install maintainer dependencies (brew bundle)"
@@ -26,8 +26,8 @@ deps:
 
 .PHONY: lint
 lint:
-	$(SHELLCHECK) --shell=sh   --severity=warning w.sh
-	$(SHELLCHECK) --shell=bash --severity=warning install.sh
+	$(SHELLCHECK) --shell=sh --severity=warning w.sh install.sh
+	$(SHELLCHECK) --severity=warning $(TESTS)
 
 .PHONY: test
 test:

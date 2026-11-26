@@ -23,7 +23,7 @@
 # ── Repo info ──────────────────────────────────────────────────────
 
 _w_repo_info() {
-  local toplevel
+  toplevel=''
   toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || {
     toplevel=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     toplevel="${toplevel%/.git}"
@@ -34,47 +34,45 @@ _w_repo_info() {
     return 1
   fi
 
-  local common_dir
+  common_dir=''
   common_dir=$(git -C "$toplevel" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
   case "$common_dir" in
     */.git) W_MAIN_REPO="${common_dir%/.git}" ;;
     *)      W_MAIN_REPO="$toplevel" ;;
   esac
 
-  local repo_name
+  repo_name=''
   repo_name=$(basename "$W_MAIN_REPO")
-  local parent
+  parent=''
   parent=$(dirname "$W_MAIN_REPO")
   W_WORKTREES_DIR="${parent}/${repo_name}-worktrees"
 }
 
 # ── Helpers ────────────────────────────────────────────────────────
 
-_w_repo_name_from_url() {
-  local url="$1"
-  local name
+_w_repo_name_from_url() (
+  url="$1"
+  name=''
   name=$(basename "$url")
   name="${name%.git}"
   printf '%s' "$name"
-}
+)
 
 # Return the last two path segments: parent/name
-_w_short_path() {
-  local p="$1"
-  local name parent
+_w_short_path() (
+  p="$1"
+  name='' parent=''
   name="${p##*/}"
   parent="${p%/*}"
   parent="${parent##*/}"
   printf '%s/%s' "$parent" "$name"
-}
+)
 
 _w_trim() {
-  local s="$1"
-  # strip leading whitespace
-  s="${s#"${s%%[! 	]*}"}"
+  # strip leading whitespace (positional parameters only: no variables to leak)
+  set -- "${1#"${1%%[! 	]*}"}"
   # strip trailing whitespace
-  s="${s%"${s##*[! 	]}"}"
-  printf '%s' "$s"
+  printf '%s' "${1%"${1##*[! 	]}"}"
 }
 
 # ── GitHub URL resolution ──────────────────────────────────────────
@@ -84,24 +82,24 @@ _w_trim() {
 #   https://github.com/owner/repo/tree/<branch>
 #   With or without trailing slash; branch may contain slashes (e.g. feat/foo)
 # Returns 0 and prints the branch name on success, returns 1 if not a tree URL.
-_w_resolve_branch_url() {
-  local input="$1"
+_w_resolve_branch_url() (
+  input="$1"
 
   # Strip trailing slash
-  local normalized="${input%/}"
+  normalized="${input%/}"
 
   # Match https://github.com/<owner>/<repo>/tree/<anything>
   case "$normalized" in
     https://github.com/*/*/tree/*)
       # Extract everything after /tree/
-      local after_tree="${normalized#https://github.com/*/*/tree/}"
+      after_tree="${normalized#https://github.com/*/*/tree/}"
       if [ -n "$after_tree" ]; then
         printf '%s' "$after_tree"
         return 0
       fi
       ;;
     http://github.com/*/*/tree/*)
-      local after_tree="${normalized#http://github.com/*/*/tree/}"
+      after_tree="${normalized#http://github.com/*/*/tree/}"
       if [ -n "$after_tree" ]; then
         printf '%s' "$after_tree"
         return 0
@@ -110,7 +108,7 @@ _w_resolve_branch_url() {
   esac
 
   return 1
-}
+)
 
 # Detect if a string is a GitHub PR URL and resolve it to a branch name.
 # Supports:
@@ -127,11 +125,11 @@ _w_gh_cmd() {
   printf '%s' "${GITHUB_CMD:-${GH_CMD:-gh}}"
 }
 
-_w_resolve_pr_url() {
-  local input="$1"
+_w_resolve_pr_url() (
+  input="$1"
 
   # Strip trailing slash for matching
-  local normalized="${input%/}"
+  normalized="${input%/}"
 
   # Match GitHub PR URL patterns using case (POSIX-compatible)
   case "$normalized" in
@@ -146,7 +144,7 @@ _w_resolve_pr_url() {
   esac
 
   # Normalize /pulls/ to /pull/ for gh CLI
-  local url
+  url=''
   case "$normalized" in
     */pulls/*)
       # Replace /pulls/ with /pull/
@@ -159,7 +157,7 @@ _w_resolve_pr_url() {
 
   # owner/repo from the URL, passed as an explicit -R so an identity-selecting
   # wrapper (GITHUB_CMD / GH_CMD) resolves deterministically.
-  local slug owner name
+  slug='' owner='' name=''
   slug="${url#*://github.com/}"
   owner="${slug%%/*}"
   slug="${slug#*/}"
@@ -173,7 +171,7 @@ _w_resolve_pr_url() {
     return 2
   fi
 
-  local branch
+  branch=''
   branch=$("$@" pr view "$url" -R "$owner/$name" --json headRefName --jq '.headRefName' 2>/dev/null)
   if [ -z "$branch" ]; then
     echo "Failed to resolve PR URL: $url" >&2
@@ -182,17 +180,16 @@ _w_resolve_pr_url() {
 
   printf '%s' "$branch"
   return 0
-}
+)
 
 # ── Base branch resolution ─────────────────────────────────────────
 
-_w_base_branch() {
-  local repo="$1"
-  local config_file="$repo/.worktree.toml"
+_w_base_branch() (
+  repo="$1"
+  config_file="$repo/.worktree.toml"
 
   if [ -f "$config_file" ]; then
-    local line key val in_section
-    in_section=0
+    line='' val=''
     while IFS= read -r line; do
       # strip comments
       line="${line%%#*}"
@@ -214,7 +211,7 @@ _w_base_branch() {
     done < "$config_file"
   fi
 
-  local remote_head
+  remote_head=''
   remote_head=$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)
   if [ -n "$remote_head" ]; then
     printf '%s' "${remote_head##refs/remotes/origin/}"
@@ -229,7 +226,7 @@ _w_base_branch() {
   done
 
   printf 'HEAD'
-}
+)
 
 # ── TOML config parser (minimal, POSIX sh) ─────────────────────────
 #
@@ -238,7 +235,7 @@ _w_base_branch() {
 #               window_names, window_dirs, window_cmds
 
 _w_load_config() {
-  local config_file="$1" branch="$2"
+  config_file="$1" branch="$2"
 
   W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX")
   : > "$W_CFG_DIR/profile"
@@ -251,7 +248,7 @@ _w_load_config() {
   [ -f "$config_file" ] || return 1
 
   # First pass: find matching profile
-  local line current_profile matched_profile="" p patterns
+  line='' current_profile='' matched_profile="" p='' patterns=''
   while IFS= read -r line; do
     line="${line%%#*}"
     line=$(_w_trim "$line")
@@ -269,12 +266,13 @@ _w_load_config() {
           patterns="${patterns#\"}"
           patterns="${patterns%\"}"
           # split on comma and test each glob
-          local IFS_SAVE="$IFS"
+          IFS_SAVE="$IFS"
           IFS=","
           for p in $patterns; do
             IFS="$IFS_SAVE"
             p=$(_w_trim "$p")
             # POSIX case for glob matching
+            # shellcheck disable=SC2254 # p is a glob from `branches =`: match it as a pattern
             case "$branch" in
               $p) matched_profile="$current_profile"; break ;;
             esac
@@ -298,7 +296,7 @@ _w_load_config() {
   printf '%s\n' "$matched_profile" > "$W_CFG_DIR/profile"
 
   # Second pass: parse matched profile
-  local reading=0 in_window="" key val window_idx=0
+  reading=0 in_window="" key='' val='' window_idx=0
   current_profile=""
 
   while IFS= read -r line; do
@@ -375,18 +373,17 @@ _w_load_config() {
 }
 
 # Replace line N (1-based) in a file with a value
-_w_file_set_line() {
-  local file="$1" n="$2" val="$3"
-  local tmp
+_w_file_set_line() (
+  file="$1" n="$2" val="$3"
+  tmp=''
   tmp=$(mktemp "${TMPDIR:-/tmp}/w-line.XXXXXX")
   awk -v n="$n" -v v="$val" 'NR==n{print v; next} {print}' "$file" > "$tmp"
   mv "$tmp" "$file"
-}
+)
 
 # Read a key from the profile key=value store
 _w_cfg_get() {
-  local key="$1"
-  grep "^${key}=" "$W_CFG_DIR/profile" 2>/dev/null | head -1 | cut -d= -f2-
+  grep "^${1}=" "$W_CFG_DIR/profile" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
 # Count non-empty lines in a file
@@ -408,8 +405,8 @@ _w_repo_commands_allowed() {
 }
 
 # _w_repo_commands_skipped <kind> <file-of-commands>
-_w_repo_commands_skipped() {
-  local kind="$1" file="$2" n cmd
+_w_repo_commands_skipped() (
+  kind="$1" file="$2" n='' cmd=''
   n=$(grep -c . "$file" 2>/dev/null) || n=0
   [ "$n" -gt 0 ] || return 0
   echo "  ⚠️  Not running $n $kind command(s) from .worktree.toml:"
@@ -419,17 +416,17 @@ _w_repo_commands_skipped() {
   done < "$file"
   echo "     Repo commands are off by default. Review them, then re-run with"
   echo "     WORKTREE_ALLOW_REPO_COMMANDS=1 to allow them."
-}
+)
 
 # ── Scaffolding & tmux ─────────────────────────────────────────────
 
 _w_run_setup() {
-  local dest="$1" repo="$2" branch="$3"
-  local config_file="$repo/.worktree.toml"
+  dest="$1" repo="$2" branch="$3"
+  config_file="$repo/.worktree.toml"
 
   _w_load_config "$config_file" "$branch" || return 0
 
-  local profile_name
+  profile_name=''
   profile_name=$(head -1 "$W_CFG_DIR/profile")
   echo "📋 Matched profile: $profile_name"
 
@@ -438,7 +435,7 @@ _w_run_setup() {
     return 0
   fi
 
-  local cmd
+  cmd=''
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     echo "  🔧 $cmd"
@@ -472,17 +469,17 @@ _w_run_setup() {
 # only if you know your venv tolerates a move.
 
 # Copy src → dest using the fastest method the platform supports.
-_w_cp_deps() {
+_w_cp_deps() (
   case "$1" in
     reflink)   cp -a --reflink=auto "$2" "$3" 2>/dev/null ;;
     clonefile) cp -Rc "$2" "$3" 2>/dev/null ;;
     *)         cp -R "$2" "$3" 2>/dev/null ;;
   esac
-}
+)
 
 # Read a top-level (outside any [profile]) dep_dirs value from a config file.
-_w_top_dep_dirs() {
-  local cfg="$1" line val
+_w_top_dep_dirs() (
+  cfg="$1" line='' val=''
   [ -f "$cfg" ] || return 1
   while IFS= read -r line; do
     line="${line%%#*}"
@@ -501,20 +498,20 @@ _w_top_dep_dirs() {
     esac
   done < "$cfg"
   return 1
-}
+)
 
 # Resolve the effective dependency-dir list for a branch (space-separated).
 # WORKTREE_DEP_DIRS replaces everything; otherwise built-ins + top-level
 # dep_dirs + matched-profile dep_dirs, deduplicated (order preserved).
-_w_resolve_dep_dirs() {
-  local repo="$1" branch="$2"
+_w_resolve_dep_dirs() (
+  repo="$1" branch="$2"
 
   if [ -n "${WORKTREE_DEP_DIRS:-}" ]; then
     printf '%s' "$WORKTREE_DEP_DIRS"
     return 0
   fi
 
-  local cfg="$repo/.worktree.toml" top="" prof dirs
+  cfg="$repo/.worktree.toml" top="" prof='' dirs=''
   [ -f "$cfg" ] && top=$(_w_top_dep_dirs "$cfg")
 
   # A top-level dep_dirs REPLACES the built-in defaults; otherwise use them.
@@ -531,7 +528,7 @@ _w_resolve_dep_dirs() {
   fi
 
   # dedupe, preserving first-seen order (no case-pattern expansion)
-  local out="" d e found
+  out="" d='' e='' found=''
   for d in $dirs; do
     found=0
     for e in $out; do
@@ -540,22 +537,22 @@ _w_resolve_dep_dirs() {
     [ "$found" -eq 0 ] && out="$out $d"
   done
   printf '%s' "${out# }"
-}
+)
 
-_w_bootstrap_deps() {
-  local repo="$1" dest="$2" branch="${3:-}"
+_w_bootstrap_deps() (
+  repo="$1" dest="$2" branch="${3:-}"
 
   [ -n "${WORKTREE_NO_DEP_BOOTSTRAP:-}" ] && return 0
 
   # A bare main repo has no working tree to copy deps from.
   [ "$(git -C "$repo" rev-parse --is-bare-repository 2>/dev/null)" = "true" ] && return 0
 
-  local dep_dirs
+  dep_dirs=''
   dep_dirs=$(_w_resolve_dep_dirs "$repo" "$branch")
   [ -n "$dep_dirs" ] || return 0
 
   # Pick the fastest copy the filesystem / coreutils supports.
-  local cp_method="plain" _t1 _t2
+  cp_method="plain" _t1='' _t2=''
   if cp --version 2>/dev/null | grep -q 'GNU coreutils'; then
     cp_method="reflink"                       # Linux: reflink where possible
   else
@@ -568,7 +565,7 @@ _w_bootstrap_deps() {
   fi
 
   # Build a find predicate:  ( -name node_modules -o -name vendor )
-  local first=1 name
+  first=1 name=''
   set --
   for name in $dep_dirs; do
     if [ "$first" -eq 1 ]; then
@@ -581,7 +578,7 @@ _w_bootstrap_deps() {
 
   # Find each dep dir at any depth; -prune so we never descend into one
   # (skips nested node_modules and keeps it fast).
-  local count=0 src rel target
+  count=0 src='' rel='' target=''
   while IFS= read -r src; do
     [ -z "$src" ] && continue
     rel="${src#"$repo"/}"
@@ -599,11 +596,11 @@ EOF
 
   [ "$count" -gt 0 ] && echo "  ✅ $count dependency dir(s) cloned into worktree"
   return 0
-}
+)
 
-_w_dev() {
-  local dest="$1" branch="$2" repo="$3"
-  local config_file="$repo/.worktree.toml"
+_w_dev() (
+  dest="$1" branch="$2" repo="$3"
+  config_file="$repo/.worktree.toml"
 
   if ! command -v tmux >/dev/null 2>&1; then
     echo "tmux not installed — install with: brew install tmux"
@@ -615,13 +612,13 @@ _w_dev() {
     return 1
   }
 
-  local session_override
+  session_override=''
   session_override=$(_w_cfg_get session)
-  local repo_base
+  repo_base=''
   repo_base=$(basename "$repo")
-  local branch_safe
+  branch_safe=''
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
-  local session_name="${session_override:-${repo_base}-${branch_safe}}"
+  session_name="${session_override:-${repo_base}-${branch_safe}}"
 
   if tmux has-session -t "$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
@@ -629,15 +626,15 @@ _w_dev() {
     return 0
   fi
 
-  local profile_name
+  profile_name=''
   profile_name=$(head -1 "$W_CFG_DIR/profile")
   echo "🚀 Starting dev session: $session_name (profile: $profile_name)"
 
   # Pre-launch commands (and window commands below) only run on opt-in
-  local allow=0
+  allow=0
   _w_repo_commands_allowed && allow=1
 
-  local cmd
+  cmd=''
   if [ "$allow" -eq 1 ]; then
     while IFS= read -r cmd; do
       [ -z "$cmd" ] && continue
@@ -655,11 +652,11 @@ _w_dev() {
   # Window 0: shell
   tmux new-session -d -s "$session_name" -c "$dest" -n "shell"
 
-  local total_windows
+  total_windows=''
   total_windows=$(wc -l < "$W_CFG_DIR/window_names" | tr -d ' ')
-  local i=1
+  i=1
   while [ "$i" -le "$total_windows" ]; do
-    local wname wdir wcmd
+    wname='' wdir='' wcmd=''
     wname=$(sed -n "${i}p" "$W_CFG_DIR/window_names")
     wdir=$(sed -n "${i}p" "$W_CFG_DIR/window_dirs")
     wcmd=$(sed -n "${i}p" "$W_CFG_DIR/window_cmds")
@@ -681,18 +678,65 @@ _w_dev() {
 
   tmux select-window -t "$session_name:shell"
   tmux attach-session -t "$session_name"
-}
+)
 
 # ── Core commands ──────────────────────────────────────────────────
+#
+# POSIX sh has no `local`, so worktree runs each command in a subshell
+# (_w_main) and helpers that only print are subshell functions too: nothing
+# they assign reaches the calling shell. The one effect the caller must see,
+# the directory change, is written by _w_chdir to a temp file and applied
+# here. The positional parameters are this function's only scratch storage,
+# so it sets no variables either. _w_repo_info, _w_load_config and
+# _w_run_setup stay brace functions because callers read what they set
+# (W_MAIN_REPO, W_WORKTREES_DIR, W_CFG_DIR); they only ever run inside that
+# subshell (or a test).
 
 worktree() {
+  set -- "$(mktemp "${TMPDIR:-/tmp}/w-cd.XXXXXX" 2>/dev/null)" "$@"
+  if [ -z "$1" ] || [ ! -f "$1" ]; then
+    echo "worktree: cannot create a temp file in ${TMPDIR:-/tmp}" >&2
+    return 1
+  fi
+  # `&& ||` keeps a failing command from aborting here under `set -e`, so the
+  # temp file is always removed.
+  (_W_CD_FILE=$1; shift; _w_main "$@") && set -- 0 "$1" || set -- "$?" "$1"
+  if [ -s "$2" ]; then
+    cd "$(cat "$2")" || set -- 1 "$2"
+  fi
+  rm -f "$2"
+  return "$1"
+}
+
+# cd into $1 and, inside `worktree`, record it so the caller's shell follows.
+_w_chdir() {
+  cd "$1" || return
+  if [ -n "${_W_CD_FILE:-}" ]; then
+    printf '%s' "$PWD" > "$_W_CD_FILE"
+  fi
+  return 0
+}
+
+_w_main() {
   case "${1:-}" in
     help|--help|-h) _w_help; return ;;
     clone)          _w_clone "${2:-}" "${3:-}"; return ;;
     --all)          _w_fzf_all; return ;;
   esac
 
-  local W_MAIN_REPO W_WORKTREES_DIR
+  # Subcommand help needs no repository.
+  case "${2:-}" in
+    --help|-h)
+      case "${1:-}" in
+        add) _w_add "" "" "$2"; return ;;
+        rm)  _w_rm "" "" "$2"; return ;;
+        ls)  _w_ls "" "$2"; return ;;
+        cd)  _w_cd "" "$2"; return ;;
+        dev) _w_dev_cmd "" "" "$2"; return ;;
+      esac ;;
+  esac
+
+  W_MAIN_REPO='' W_WORKTREES_DIR=''
   if ! _w_repo_info 2>/dev/null; then
     case "${1:-}" in
       "")  _w_fzf_all; return ;;
@@ -721,8 +765,8 @@ if [ -z "${WORKTREE_NO_ALIASES:-}" ]; then
   alias wt='worktree'
 fi
 
-_w_clone() {
-  local url="$1" branch="${2:-}"
+_w_clone() (
+  url="$1" branch="${2:-}"
 
   case "$url" in
     --help|-h)
@@ -745,10 +789,10 @@ EOF
 
   [ -z "$url" ] && { echo "usage: w clone <repo-url> [branch]"; return 1; }
 
-  local name
+  name=''
   name=$(_w_repo_name_from_url "$url")
-  local bare_dir="$PWD/$name"
-  local wt_dir="$PWD/${name}-worktrees"
+  bare_dir="$PWD/$name"
+  wt_dir="$PWD/${name}-worktrees"
 
   if [ -d "$bare_dir" ]; then
     echo "📦 $name already exists at $bare_dir"
@@ -768,9 +812,9 @@ EOF
 
   if [ -n "$branch" ]; then
     echo ""
-    local base
+    base=''
     base=$(_w_base_branch "$bare_dir")
-    local dest="$wt_dir/$branch"
+    dest="$wt_dir/$branch"
 
     if git -C "$bare_dir" show-ref --verify --quiet "refs/heads/$branch" || \
        git -C "$bare_dir" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
@@ -783,20 +827,20 @@ EOF
     fi
 
     if [ $? -eq 0 ]; then
-      cd "$dest"
+      _w_chdir "$dest" || return 1
       # No-op for a bare clone (no working tree to copy from), kept for
       # symmetry so a non-bare source would still bootstrap.
       _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
       [ -f "$dest/.worktree.toml" ] && _w_run_setup "$dest" "$bare_dir" "$branch"
     fi
   fi
-}
+)
 
-_w_go() {
-  local repo="$1" wtdir="$2" branch="$3"
+_w_go() (
+  repo="$1" wtdir="$2" branch="$3"
 
   # Resolve GitHub branch tree URLs to branch names
-  local resolved
+  resolved=''
   if resolved=$(_w_resolve_branch_url "$branch"); then
     echo "🔗 Resolved branch URL → $resolved"
     branch="$resolved"
@@ -809,16 +853,16 @@ _w_go() {
     return 1
   fi
 
-  local dest="$wtdir/$branch"
+  dest="$wtdir/$branch"
   if [ -d "$dest" ]; then
-    cd "$dest"
+    _w_chdir "$dest"
   else
     _w_add "$repo" "$wtdir" "$branch"
   fi
-}
+)
 
-_w_add() {
-  local repo="$1" wtdir="$2" branch="$3"
+_w_add() (
+  repo="$1" wtdir="$2" branch="$3"
 
   case "$branch" in
     --help|-h)
@@ -853,7 +897,7 @@ EOF
   [ -z "$branch" ] && { echo "usage: w add <branch> (see w add --help)"; return 1; }
 
   # Resolve GitHub branch tree URLs to branch names
-  local resolved
+  resolved=''
   if resolved=$(_w_resolve_branch_url "$branch"); then
     echo "🔗 Resolved branch URL → $resolved"
     branch="$resolved"
@@ -866,12 +910,12 @@ EOF
     return 1
   fi
 
-  local dest="$wtdir/$branch"
+  dest="$wtdir/$branch"
 
   if [ -d "$dest" ]; then
     echo "↩️  Already exists — switching to $(_w_short_path "$dest")"
-    cd "$dest"
-    return 0
+    _w_chdir "$dest"
+    return
   fi
 
   mkdir -p "$wtdir"
@@ -888,7 +932,7 @@ EOF
       echo "🌿 Creating worktree: $branch (tracking origin/$branch)"
       git -C "$repo" worktree add --track -b "$branch" "$dest" "origin/$branch"
     else
-      local base
+      base=''
       base=$(_w_base_branch "$repo")
       echo "🌿 Creating worktree: $branch (new branch from $base)"
       git -C "$repo" worktree add -b "$branch" "$dest" "origin/$base" 2>/dev/null \
@@ -896,27 +940,27 @@ EOF
     fi
   fi
 
-  local wt_ok=$?
+  wt_ok=$?
 
   if [ "$wt_ok" -eq 0 ]; then
-    cd "$dest"
+    _w_chdir "$dest" || return 1
     echo "  ✅ $(_w_short_path "$dest")"
     _w_bootstrap_deps "$repo" "$dest" "$branch"
   fi
 
   if [ "$wt_ok" -eq 0 ] && [ -f "$repo/.worktree.toml" ]; then
     _w_run_setup "$dest" "$repo" "$branch"
-    local win_count
+    win_count=''
     win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
     if [ "${win_count:-0}" -gt 0 ]; then
       echo ""
       echo "Run 'worktree dev' to launch tmux session."
     fi
   fi
-}
+)
 
-_w_dev_cmd() {
-  local repo="$1" wtdir="$2" branch="$3"
+_w_dev_cmd() (
+  repo="$1" wtdir="$2" branch="$3"
 
   case "$branch" in
     --help|-h)
@@ -945,7 +989,7 @@ EOF
   if [ -z "$branch" ]; then
     case "$PWD" in
       "$wtdir"/*)
-        branch="${PWD#$wtdir/}"
+        branch="${PWD#"$wtdir"/}"
         branch="${branch%%/*}"
         ;;
       *)
@@ -954,17 +998,17 @@ EOF
     esac
   fi
 
-  local dest="$wtdir/$branch"
+  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
   fi
 
   _w_dev "$dest" "$branch" "$repo"
-}
+)
 
-_w_rm() {
-  local repo="$1" wtdir="$2" branch="$3"
+_w_rm() (
+  repo="$1" wtdir="$2" branch="$3"
 
   case "$branch" in
     --help|-h)
@@ -983,7 +1027,7 @@ EOF
   if [ -z "$branch" ]; then
     case "$PWD" in
       "$wtdir"/*)
-        branch="${PWD#$wtdir/}"
+        branch="${PWD#"$wtdir"/}"
         branch="${branch%%/*}"
         ;;
       *)
@@ -992,7 +1036,7 @@ EOF
     esac
   fi
 
-  local dest="$wtdir/$branch"
+  dest="$wtdir/$branch"
   if [ ! -d "$dest" ]; then
     echo "No worktree at $dest"
     return 1
@@ -1000,31 +1044,31 @@ EOF
 
   echo "This will remove worktree AND delete branch '$branch'."
   printf 'Type the name to confirm: '
-  local confirm
+  confirm=''
   read -r confirm
   if [ "$confirm" != "$branch" ]; then
     echo "Aborted — name didn't match."
     return 1
   fi
 
-  local repo_base branch_safe session_guess
+  repo_base='' branch_safe='' session_guess=''
   repo_base=$(basename "$repo")
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
   session_guess="${repo_base}-${branch_safe}"
   tmux kill-session -t "$session_guess" 2>/dev/null
 
   case "$PWD" in
-    "$dest"*) cd "$repo" ;;
+    "$dest"*) _w_chdir "$repo" || return 1 ;;
   esac
 
   echo "🗑️  Removing worktree: $branch"
   git -C "$repo" worktree remove "$dest" || return 1
   git -C "$repo" branch -D "$branch"
   echo "  ✅ Done"
-}
+)
 
-_w_cd() {
-  local wtdir="$1" branch="$2"
+_w_cd() (
+  wtdir="$1" branch="$2"
 
   case "$branch" in
     --help|-h)
@@ -1035,17 +1079,17 @@ _w_cd() {
 
   [ -z "$branch" ] && { echo "usage: w cd <branch>"; return 1; }
 
-  local dest="$wtdir/$branch"
+  dest="$wtdir/$branch"
   if [ -d "$dest" ]; then
-    cd "$dest"
+    _w_chdir "$dest"
   else
     echo "No worktree at $dest"
     return 1
   fi
-}
+)
 
-_w_ls() {
-  local repo="${1:-}" flag="${2:-}"
+_w_ls() (
+  repo="${1:-}" flag="${2:-}"
 
   case "$flag" in
     --help|-h)
@@ -1061,12 +1105,12 @@ _w_ls() {
   fi
 
   git -C "$repo" worktree list | _w_ls_format
-}
+)
 
 # Format `git worktree list` output grouped by repo, with a blank line
 # between each repo and a ▶ marker on the current worktree.
-_w_ls_format() {
-  local current="$PWD"
+_w_ls_format() (
+  current="$PWD"
   awk -v current="$current" '
   BEGIN { n = 0 }
   {
@@ -1121,20 +1165,20 @@ _w_ls_format() {
     }
   }
   '
-}
+)
 
 # ── Worktree discovery ─────────────────────────────────────────────
 
-_w_collect_all_worktrees() {
-  local W_MAIN_REPO W_WORKTREES_DIR
-  local search_dirs=""
+_w_collect_all_worktrees() (
+  W_MAIN_REPO='' W_WORKTREES_DIR=''
+  search_dirs=""
 
   if _w_repo_info 2>/dev/null; then
     search_dirs="$(dirname "$W_MAIN_REPO")"
   fi
   [ -d "$HOME/dev" ] && search_dirs="$search_dirs $HOME/dev"
 
-  local seen="" dir candidate
+  seen="" dir='' candidate=''
   for dir in $search_dirs; do
     for candidate in "$dir"/*/; do
       candidate="${candidate%/}"
@@ -1146,11 +1190,11 @@ _w_collect_all_worktrees() {
       git -C "$candidate" worktree list 2>/dev/null
     done
   done | sort -u
-}
+)
 
 # ── fzf integration ────────────────────────────────────────────────
 
-_w_format_worktrees() {
+_w_format_worktrees() (
   awk '{
     path = $1
     branch = ""
@@ -1183,7 +1227,7 @@ _w_format_worktrees() {
     dim = "\033[2m"; reset = "\033[0m"
     printf "%s\t%s%s \342\200\272%s %s\n", path, dim, repo_name, reset, branch
   }'
-}
+)
 
 _w_fzf_pick() {
   if ! command -v fzf >/dev/null 2>&1; then
@@ -1191,11 +1235,11 @@ _w_fzf_pick() {
     return 1
   fi
 
-  local listing
+  listing=''
   listing=$(cat)
   [ -z "$listing" ] && { echo "No worktrees found"; return 1; }
 
-  local formatted sel
+  formatted='' sel=''
   formatted=$(printf '%s\n' "$listing" | _w_format_worktrees)
 
   sel=$(printf '%s\n' "$formatted" | \
@@ -1205,20 +1249,20 @@ _w_fzf_pick() {
         --preview-window=right:50%)
 
   [ -z "$sel" ] && return
-  cd "${sel%%	*}"
+  _w_chdir "${sel%%	*}"
 }
 
-_w_fzf() {
-  local repo="$1"
+_w_fzf() (
+  repo="$1"
   git -C "$repo" worktree list | _w_fzf_pick
-}
+)
 
-_w_fzf_all() {
+_w_fzf_all() (
   _w_collect_all_worktrees | _w_fzf_pick
-}
+)
 
-_w_help() {
-  local bold="\033[1m" cyan="\033[36m" yellow="\033[33m" dim="\033[2m" reset="\033[0m"
+_w_help() (
+  bold="\033[1m" cyan="\033[36m" yellow="\033[33m" dim="\033[2m" reset="\033[0m"
   printf "${bold}WORKTREE${reset}(1)                    Git Worktree Helper                   ${bold}WORKTREE${reset}(1)\n\n"
   printf "${bold}NAME${reset}\n"
   printf "       worktree — git worktree helper (aliases: w, wt)\n\n"
@@ -1259,4 +1303,4 @@ _w_help() {
   printf "       ${yellow}WORKTREE_DEP_DIRS${reset}=\"a b c\"     replace the whole set ${dim}(venv is not relocatable)${reset}\n"
   printf "       ${yellow}WORKTREE_NO_DEP_BOOTSTRAP=1${reset}   disable\n\n"
   printf "${dim}Run any subcommand with --help for more detail, e.g. worktree add --help${reset}\n"
-}
+)

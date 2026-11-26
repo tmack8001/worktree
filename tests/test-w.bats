@@ -6,6 +6,10 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+  # The real tmux (if any), captured before a test puts a fake one on PATH,
+  # so teardown can always stop the test's private tmux server.
+  REAL_TMUX="$(command -v tmux 2>/dev/null || true)"
+  export REAL_TMUX
 }
 
 setup() {
@@ -29,10 +33,40 @@ setup() {
 
   export REPO="$TEST_DIR/repo"
   export WTS="$TEST_DIR/repo-worktrees"
+
+  # Any tmux a test reaches talks to a private server under TEST_DIR, never
+  # the user's (TMUX_TMPDIR picks the socket dir; TMUX would point at the
+  # current server, so drop it).
+  mkdir -p "$TEST_DIR/tmux"
+  export TMUX_TMPDIR="$TEST_DIR/tmux"
+  unset TMUX
 }
 
 teardown() {
+  # Stop the private tmux server, if a test started one: a detached server
+  # inherits bats' output pipe and would keep bats waiting forever.
+  if [ -n "$REAL_TMUX" ]; then
+    TMUX_TMPDIR="$TEST_DIR/tmux" "$REAL_TMUX" kill-server >/dev/null 2>&1 || true
+  fi
+  cd "$BATS_TEST_DIRNAME" || return
   rm -rf "$TEST_DIR"
+}
+
+# A PATH directory with only the commands w.sh needs, so `command -v tmux`
+# (and fzf) fail even where they are installed next to git.
+_path_without_tmux() {
+  local bin="$TEST_DIR/no-tmux-bin" c p
+  mkdir -p "$bin"
+  for c in git mktemp basename dirname cat rm sort awk grep sed tr head cut wc mkdir find cp mv; do
+    p="$(command -v "$c")" || continue
+    ln -sf "$p" "$bin/$c"
+  done
+  printf '%s' "$bin"
+}
+
+# Output with ANSI colour sequences removed.
+_plain() {
+  printf '%s' "$1" | sed "s/$(printf '\033')\[[0-9;]*m//g"
 }
 
 # ── _w_repo_info ───────────────────────────────────────────────────
@@ -152,7 +186,7 @@ branches = "*"
 run = "touch .setup-marker"
 TOML
   cd "$REPO"
-  WORKTREE_ALLOW_REPO_COMMANDS=1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
   worktree add setup-test 2>/dev/null
   [ -f "$WTS/setup-test/.setup-marker" ]
 }
@@ -204,7 +238,7 @@ TOML
 @test "opt-in: WORKTREE_ALLOW_REPO_COMMANDS=1 runs every setup command" {
   _write_setup_toml
   cd "$REPO"
-  WORKTREE_ALLOW_REPO_COMMANDS=1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
   run worktree add allowed
   [ "$status" -eq 0 ]
   [ -f "$WTS/allowed/.setup-marker" ]
@@ -271,7 +305,7 @@ TOML
   _fake_tmux
   cd "$REPO"
   worktree add devallow >/dev/null 2>&1
-  WORKTREE_ALLOW_REPO_COMMANDS=1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
   PATH="$TEST_DIR/bin:$PATH"
   cd "$WTS/devallow"
   run worktree dev
@@ -292,7 +326,7 @@ TOML
   _fake_tmux
   cd "$REPO"
   worktree add devfail >/dev/null 2>&1
-  WORKTREE_ALLOW_REPO_COMMANDS=1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
   PATH="$TEST_DIR/bin:$PATH"
   cd "$WTS/devfail"
   run worktree dev
@@ -392,8 +426,12 @@ run = "echo hi"
 TOML
   cd "$REPO"
   worktree add tmux-test 2>/dev/null
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH=/usr/bin:/bin worktree dev 2>&1"
-  [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]
+  local nopath
+  nopath="$(_path_without_tmux)"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$nopath' worktree dev 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"tmux not installed"* ]]
+  [[ "$output" != *"Starting dev session"* ]]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -406,8 +444,11 @@ TOML
 }
 
 @test "w (bare): falls back gracefully outside a git repo" {
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH=/usr/bin:/bin worktree 2>&1"
+  local nopath
+  nopath="$(_path_without_tmux)"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$nopath' worktree 2>&1"
   [[ "$output" != *"Not in a git repository"* ]]
+  [[ "$output" == *"fzf not installed"* ]]
 }
 
 @test "w ls: lists all worktrees when outside a git repo" {
@@ -422,27 +463,60 @@ TOML
 
 # ── worktree help ──────────────────────────────────────────────────
 
+# The help tests run from TEST_DIR, which is not a git repository, so they do
+# not depend on where bats was started.
+
 @test "w help: shows usage" {
+  cd "$TEST_DIR"
   run worktree help
-  [[ "$output" == *"git worktree helper"* ]]
-  [[ "$output" == *"worktree dev"* ]]
-  [[ "$output" == *"worktree clone"* ]]
-  [[ "$output" == *"w, wt"* ]]
+  [ "$status" -eq 0 ]
+  local plain
+  plain="$(_plain "$output")"
+  [[ "$plain" == *"git worktree helper"* ]]
+  [[ "$plain" == *"worktree dev"* ]]
+  [[ "$plain" == *"worktree clone"* ]]
+  [[ "$plain" == *"w, wt"* ]]
 }
 
 @test "w add --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree add --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Create a new worktree"* ]]
 }
 
 @test "w rm --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree rm --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Remove a worktree"* ]]
 }
 
 @test "w dev --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree dev --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Launch a tmux dev session"* ]]
+}
+
+@test "w cd --help: shows subcommand help" {
+  cd "$TEST_DIR"
+  run worktree cd --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Change directory"* ]]
+}
+
+@test "w ls --help: shows subcommand help" {
+  cd "$TEST_DIR"
+  run worktree ls --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"List worktrees"* ]]
+}
+
+@test "help tests: TEST_DIR is not inside a git repository" {
+  cd "$TEST_DIR"
+  run git rev-parse --git-dir
+  [ "$status" -ne 0 ]
 }
 
 # ── worktree clone ─────────────────────────────────────────────────
@@ -815,16 +889,19 @@ _gh_setup() {
 # ── w add --help updated content ──────────────────────────────────
 
 @test "w add --help: mentions github-pr-url" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"github-pr-url"* ]]
 }
 
 @test "w add --help: mentions github-branch-url" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"github-branch-url"* ]]
 }
 
 @test "w add --help: shows examples section" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"Examples:"* ]]
 }

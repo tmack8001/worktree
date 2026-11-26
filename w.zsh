@@ -583,6 +583,18 @@ worktree() {
     --all)          _w_fzf_all; return ;;
   esac
 
+  # Subcommand help needs no repository.
+  case "${2:-}" in
+    --help|-h)
+      case "${1:-}" in
+        add) _w_add "" "" "$2"; return ;;
+        rm)  _w_rm "" "" "$2"; return ;;
+        ls)  _w_ls "" "$2"; return ;;
+        cd)  _w_cd "" "$2"; return ;;
+        dev) _w_dev_cmd "" "" "$2"; return ;;
+      esac ;;
+  esac
+
   local W_MAIN_REPO W_WORKTREES_DIR
   if ! _w_repo_info 2>/dev/null; then
     # Not in a repo — fall back to cross-repo behavior where it makes sense

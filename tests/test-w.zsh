@@ -117,10 +117,34 @@ setup_repo() {
   echo "$repo_dir"
 }
 
+# Any tmux a test reaches talks to a private server under TEST_ROOT, never the
+# user's (TMUX_TMPDIR picks the socket dir; TMUX would point at the current
+# server, so drop it). cleanup stops that server: a detached tmux server keeps
+# the caller's output pipe open and would hang `make test | ...`.
+REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+mkdir -p "$TEST_ROOT/tmux"
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+unset TMUX
+
 cleanup() {
-  rm -rf "$TEST_ROOT"
+  if [[ -n "$REAL_TMUX" ]]; then
+    TMUX_TMPDIR="$TEST_ROOT/tmux" "$REAL_TMUX" kill-server >/dev/null 2>&1 || true
+  fi
+  cd / && rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
+
+# A PATH directory with only the commands w.zsh needs, so `command -v tmux`
+# fails even where tmux is installed next to git.
+path_without_tmux() {
+  local bin="$TEST_ROOT/no-tmux-bin" c p
+  mkdir -p "$bin"
+  for c in git mktemp basename dirname cat rm sort awk grep sed tr head cut wc mkdir find cp mv; do
+    p=$(command -v "$c") || continue
+    ln -sf "$p" "$bin/$c"
+  done
+  print -r -- "$bin"
+}
 
 # ── Test groups ────────────────────────────────────────────────────
 
@@ -398,6 +422,23 @@ test_subcommand_help() {
 
     output=$(w dev --help 2>&1)
     assert_contains "dev --help" "$output" "Launch a tmux dev session"
+  )
+
+  # The same help outside any git repository (TEST_ROOT is not one).
+  (
+    cd "$TEST_ROOT"
+    local output
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+      fail "TEST_ROOT is inside a git repository"
+    fi
+    for sub in add rm cd ls dev; do
+      output=$(w "$sub" --help 2>&1)
+      if [[ "$output" == *"Not in a git repository"* || "$output" != *[Uu]sage* ]]; then
+        fail "$sub --help outside a repo (got: $output)"
+      else
+        pass "$sub --help outside a repo"
+      fi
+    done
   )
 }
 
@@ -697,15 +738,12 @@ TOML
     w add tmux-test >/dev/null 2>&1
     cd "$TEST_ROOT/dev-notmux-worktrees/tmux-test"
 
-    # Temporarily hide tmux from PATH
-    local output
-    output=$(PATH="/usr/bin:/bin" w dev 2>&1)
-    if [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]; then
-      # Either tmux isn't available (expected) or it is (also fine)
-      pass "dev handles tmux availability correctly"
-    else
-      fail "dev unexpected output: $output"
-    fi
+    # Hide tmux from PATH (a PATH with only the needed tools, not /usr/bin)
+    local output nopath rc
+    nopath=$(path_without_tmux)
+    output=$(PATH="$nopath" w dev 2>&1); rc=$?
+    assert_exit_code "dev without tmux fails" "1" "$rc"
+    assert_contains "dev without tmux says so" "$output" "tmux not installed"
   )
 }
 
@@ -1107,7 +1145,7 @@ test_shortcut_pr_url_no_gh() {
 test_add_help_pr_url() {
   echo "── w add --help (PR URL / branch URL content) ──"
   local output
-  output=$(w add --help 2>&1)
+  output=$(cd "$TEST_ROOT" && w add --help 2>&1)
   assert_contains "add help mentions github-pr-url" "$output" "github-pr-url"
   assert_contains "add help mentions github-branch-url" "$output" "github-branch-url"
   assert_contains "add help shows Examples section" "$output" "Examples:"
