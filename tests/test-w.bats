@@ -1060,6 +1060,89 @@ _gh_setup() {
   [[ "$output" == *"Examples:"* ]]
 }
 
+# ── _w_load_config temp dirs ───────────────────────────────────────
+
+# Point TMPDIR at a private, empty dir so w-cfg.* dirs can be counted.
+_private_tmpdir() {
+  mkdir -p "$TEST_DIR/tmp"
+  export TMPDIR="$TEST_DIR/tmp"
+}
+
+_cfg_dir_count() {
+  find "$TMPDIR" -maxdepth 1 -name 'w-cfg.*' | wc -l | tr -d ' '
+}
+
+@test "w-cfg: _w_load_config leaves no temp dir for a missing config" {
+  _private_tmpdir
+  _w_load_config "$TEST_DIR/nope.toml" anything || true
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: _w_load_config leaves no temp dir when no profile matches" {
+  _private_tmpdir
+  printf '[profile.fe]\nbranches = "fe/*"\n' > "$TEST_DIR/test.toml"
+  local rc=0
+  _w_load_config "$TEST_DIR/test.toml" be/x || rc=$?
+  [ "$rc" -eq 1 ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: _w_cfg_cleanup removes the dir of a successful load" {
+  _private_tmpdir
+  printf '[profile.default]\nbranches = "*"\n' > "$TEST_DIR/test.toml"
+  _w_load_config "$TEST_DIR/test.toml" anything
+  [ "$(_cfg_dir_count)" = "1" ]
+  [ "$(head -1 "$W_CFG_DIR/profile")" = "default" ]
+  _w_cfg_cleanup
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "$W_CFG_DIR" ]
+}
+
+@test "w-cfg: w add, w dev and their error paths leave no temp dirs" {
+  _private_tmpdir
+  _write_dev_toml
+  printf '\n[[profile.default.setup]]\nrun = "true"\n' >> "$REPO/.worktree.toml"
+  _fake_tmux
+  cd "$REPO"
+
+  # normal: add (dep-dir lookup + setup) and dev
+  worktree add cfg-normal >/dev/null 2>&1
+  [ -d "$WTS/cfg-normal" ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  cd "$WTS/cfg-normal"
+  PATH="$TEST_DIR/bin:$PATH" worktree dev >/dev/null 2>&1
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # error: an allowed pre command fails and dev aborts
+  printf '[profile.default]\nbranches = "*"\n\n[[profile.default.pre]]\nrun = "false"\n' > "$REPO/.worktree.toml"
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  PATH="$TEST_DIR/bin:$PATH" run worktree dev
+  unset WORKTREE_ALLOW_REPO_COMMANDS
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"aborting session"* ]]
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # error: no profile matches the branch
+  printf '[profile.fe]\nbranches = "fe/*"\n' > "$REPO/.worktree.toml"
+  cd "$REPO"
+  worktree add cfg-nomatch >/dev/null 2>&1
+  cd "$WTS/cfg-nomatch"
+  run worktree dev
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no matching profile"* ]]
+  [ "$(_cfg_dir_count)" = "0" ]
+
+  # missing config
+  rm "$REPO/.worktree.toml"
+  cd "$REPO"
+  worktree add cfg-missing >/dev/null 2>&1
+  [ -d "$WTS/cfg-missing" ]
+  [ "$(_cfg_dir_count)" = "0" ]
+  [ -z "${W_CFG_DIR:-}" ]
+}
+
 # ── TOML config parser ─────────────────────────────────────────────
 
 @test "_w_load_config: matches fe/* to frontend profile" {

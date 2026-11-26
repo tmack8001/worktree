@@ -255,19 +255,22 @@ _w_base_branch() (
 # Writes results to temp files since sh can't use global arrays.
 # Callers read: $W_CFG_DIR/profile, setup_cmds, pre_cmds,
 #               window_names, window_dirs, window_cmds
+# On success the caller owns $W_CFG_DIR and must call _w_cfg_cleanup when
+# done with it. On failure nothing is left behind and W_CFG_DIR is empty.
+# (No trap: this runs in the user's shell, whose own traps stay untouched.)
 
 _w_load_config() {
   config_file="$1" branch="$2"
 
-  W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX")
+  W_CFG_DIR=''
+  [ -f "$config_file" ] || return 1
+  W_CFG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/w-cfg.XXXXXX") || { W_CFG_DIR=''; return 1; }
   : > "$W_CFG_DIR/profile"
   : > "$W_CFG_DIR/setup_cmds"
   : > "$W_CFG_DIR/pre_cmds"
   : > "$W_CFG_DIR/window_names"
   : > "$W_CFG_DIR/window_dirs"
   : > "$W_CFG_DIR/window_cmds"
-
-  [ -f "$config_file" ] || return 1
 
   # First pass: find matching profile
   line='' current_profile='' matched_profile="" p='' patterns=''
@@ -311,6 +314,7 @@ _w_load_config() {
     if grep -q '^\[profile\.default\]' "$config_file" 2>/dev/null; then
       matched_profile="default"
     else
+      _w_cfg_cleanup
       return 1
     fi
   fi
@@ -392,6 +396,14 @@ _w_load_config() {
   done < "$config_file"
 
   return 0
+}
+
+# Remove the directory a successful _w_load_config left in $W_CFG_DIR.
+_w_cfg_cleanup() {
+  case "${W_CFG_DIR:-}" in
+    */w-cfg.?*) rm -rf "$W_CFG_DIR" ;;
+  esac
+  W_CFG_DIR=''
 }
 
 # Replace line N (1-based) in a file with a value
@@ -547,6 +559,7 @@ _w_resolve_dep_dirs() (
   if [ -f "$cfg" ] && _w_load_config "$cfg" "$branch" 2>/dev/null; then
     prof=$(_w_cfg_get dep_dirs)
     [ -n "$prof" ] && dirs="$dirs $prof"
+    _w_cfg_cleanup
   fi
 
   # dedupe, preserving first-seen order (no case-pattern expansion)
@@ -643,6 +656,7 @@ _w_dev() (
   session_name="${session_override:-${repo_base}-${branch_safe}}"
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
+    _w_cfg_cleanup
     echo "🔌 Reattaching to $session_name"
     tmux attach-session -t "=$session_name"
     return 0
@@ -663,6 +677,7 @@ _w_dev() (
       echo "  ⚙️  $cmd"
       if ! (cd "$dest" && eval "$cmd"); then
         echo "  ❌ Failed — aborting session"
+        _w_cfg_cleanup
         return 1
       fi
     done < "$W_CFG_DIR/pre_cmds"
@@ -698,6 +713,7 @@ _w_dev() (
     i=$((i + 1))
   done
 
+  _w_cfg_cleanup
   tmux select-window -t "=${session_name}:shell"
   tmux attach-session -t "=$session_name"
 )
@@ -853,7 +869,10 @@ EOF
       # No-op for a bare clone (no working tree to copy from), kept for
       # symmetry so a non-bare source would still bootstrap.
       _w_bootstrap_deps "$bare_dir" "$dest" "$branch"
-      [ -f "$dest/.worktree.toml" ] && _w_run_setup "$dest" "$bare_dir" "$branch"
+      if [ -f "$dest/.worktree.toml" ]; then
+        _w_run_setup "$dest" "$bare_dir" "$branch"
+        _w_cfg_cleanup
+      fi
     fi
   fi
 )
@@ -973,7 +992,8 @@ EOF
   if [ "$wt_ok" -eq 0 ] && [ -f "$repo/.worktree.toml" ]; then
     _w_run_setup "$dest" "$repo" "$branch"
     win_count=''
-    win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
+    [ -n "${W_CFG_DIR:-}" ] && win_count=$(wc -l < "$W_CFG_DIR/window_names" 2>/dev/null | tr -d ' ')
+    _w_cfg_cleanup
     if [ "${win_count:-0}" -gt 0 ]; then
       echo ""
       echo "Run 'worktree dev' to launch tmux session."
