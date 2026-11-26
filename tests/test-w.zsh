@@ -1825,6 +1825,55 @@ TOML
   "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
 }
 
+# A profile's `session` override names the session w dev makes; w rm must
+# look it up the same way and kill that session, not the default name.
+test_rm_session_override() {
+  echo "── tmux: w rm kills the profile's session override ──"
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+  local repo
+  repo=$(setup_repo "so")
+  local wts="$TEST_ROOT/so-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.fe]
+branches = "fe/*"
+session = "custom.sess"
+
+[[profile.fe.windows]]
+name = "server"
+
+[profile.default]
+branches = "*"
+TOML
+  local bin="$TEST_ROOT/so-bin"
+  _zt_attach_logging_tmux "$bin"
+  (
+    cd "$repo"
+    w add fe/login >/dev/null 2>&1
+    cd "$wts/fe/login"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with a session override succeeds" "0" "$rc"
+    assert_eq "dev attaches the override session" "custom_sess" "$(<"$bin/attach.log")"
+    _zt_tmux_session so-fe-login
+    _zt_tmux_session custom_sess-2
+    cd "$repo"
+    echo "fe/login" | w rm fe/login >/dev/null 2>&1
+    assert_dir_not_exists "rm removed the worktree" "$wts/fe/login"
+    _zt_tmux_has custom_sess && fail "rm left the override session custom_sess" \
+      || pass "rm kills the override session"
+    _zt_tmux_has so-fe-login && pass "rm keeps the session with the default name" \
+      || fail "rm killed so-fe-login instead of the override"
+    _zt_tmux_has custom_sess-2 && pass "rm keeps a longer session next to the override" \
+      || fail "rm killed custom_sess-2"
+  )
+  "$REAL_TMUX" kill-session -t "=so-fe-login" >/dev/null 2>&1
+  "$REAL_TMUX" kill-session -t "=custom_sess-2" >/dev/null 2>&1
+  "$REAL_TMUX" kill-session -t "=custom_sess" >/dev/null 2>&1
+}
+
 # ── gh command override ───────────────────────────────────────────
 
 _zt_fake_gh() {
@@ -1967,6 +2016,7 @@ test_branch_arg_from_git
 test_switch_from_git
 test_tmux_exact_match
 test_tmux_names
+test_rm_session_override
 test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────

@@ -183,6 +183,15 @@ _w_session_name() (
   _w_tmux_name "$override"
 )
 
+# The session `w dev` uses for branch $2 of repo $1: the `session` of the
+# profile .worktree.toml matches for the branch (the same lookup as w dev),
+# else the default. w dev and w rm both use this, so w rm kills the session
+# w dev made.
+_w_profile_session_name() (
+  _w_load_config "$1/.worktree.toml" "$2" >/dev/null 2>&1 || :
+  _w_session_name "$1" "$2" "$(_w_cfg_get session)"
+)
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -753,7 +762,7 @@ _w_dev() (
   }
 
   session_name=''
-  session_name=$(_w_session_name "$repo" "$branch" "$(_w_cfg_get session)")
+  session_name=$(_w_profile_session_name "$repo" "$branch")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
@@ -1220,9 +1229,11 @@ EOF
     return 1
   fi
 
-  session_guess=''
-  session_guess=$(_w_session_name "$repo" "$branch")
-  tmux kill-session -t "=$session_guess" 2>/dev/null
+  # The session w dev made for this branch (profile `session` override
+  # included).
+  session_name=''
+  session_name=$(_w_profile_session_name "$repo" "$branch")
+  tmux kill-session -t "=$session_name" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).
   case "$(pwd -P)" in

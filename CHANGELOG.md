@@ -22,6 +22,10 @@ its tag.
 
 ### Fixed
 
+- `w rm` kills the tmux session named by the matched profile's `session` override, looked up in
+  `.worktree.toml` the same way as `w dev` (one helper, `_w_profile_session_name`). Before, it always killed
+  `<repo>-<branch>`, so it left the session `w dev` had made and could kill an unrelated session that had the
+  default name (`w.sh`, `w.zsh`).
 - `w cd <branch>`, `w <branch>` and `w add <branch>` take an existing branch's worktree from
   `git worktree list --porcelain` (as `w rm` and `w dev` do) instead of assuming `<worktrees>/<branch>`. Before,
   `w cd` failed for a worktree in a directory not named after its branch and went into a directory of the

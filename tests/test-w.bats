@@ -891,6 +891,42 @@ FAKE
   [ "$status" -ne 0 ]
 }
 
+# A profile's `session` override names the session w dev makes; w rm must
+# look it up the same way and kill that session, not the default name.
+@test "tmux names: w rm kills the session a profile's session override names, and only it" {
+  _need_tmux
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.fe]
+branches = "fe/*"
+session = "custom.sess"
+
+[[profile.fe.windows]]
+name = "server"
+
+[profile.default]
+branches = "*"
+TOML
+  cd "$REPO"
+  worktree add fe/login >/dev/null 2>&1
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/fe/login"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "custom_sess" ]
+  # the default name and a longer name next to it must survive w rm
+  _tmux_session repo-fe-login
+  _tmux_session custom_sess-2
+  cd "$REPO"
+  run $W_SH -c "echo fe/login | (. '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm fe/login 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/fe/login" ]
+  run _tmux_has custom_sess
+  [ "$status" -ne 0 ]
+  _tmux_has repo-fe-login
+  _tmux_has custom_sess-2
+}
+
 # ── worktree outside a repo ────────────────────────────────────────
 
 @test "w add: errors outside a git repo" {
