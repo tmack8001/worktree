@@ -6,6 +6,10 @@
 setup_file() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd -P)"
   export REPO_ROOT
+  # The real tmux (if any), captured before a test puts a fake one on PATH,
+  # so teardown can always stop the test's private tmux server.
+  REAL_TMUX="$(command -v tmux 2>/dev/null || true)"
+  export REAL_TMUX
 }
 
 setup() {
@@ -29,10 +33,40 @@ setup() {
 
   export REPO="$TEST_DIR/repo"
   export WTS="$TEST_DIR/repo-worktrees"
+
+  # Any tmux a test reaches talks to a private server under TEST_DIR, never
+  # the user's (TMUX_TMPDIR picks the socket dir; TMUX would point at the
+  # current server, so drop it).
+  mkdir -p "$TEST_DIR/tmux"
+  export TMUX_TMPDIR="$TEST_DIR/tmux"
+  unset TMUX
 }
 
 teardown() {
+  # Stop the private tmux server, if a test started one: a detached server
+  # inherits bats' output pipe and would keep bats waiting forever.
+  if [ -n "$REAL_TMUX" ]; then
+    TMUX_TMPDIR="$TEST_DIR/tmux" "$REAL_TMUX" kill-server >/dev/null 2>&1 || true
+  fi
+  cd "$BATS_TEST_DIRNAME" || return
   rm -rf "$TEST_DIR"
+}
+
+# A PATH directory with only the commands w.sh needs, so `command -v tmux`
+# (and fzf) fail even where they are installed next to git.
+_path_without_tmux() {
+  local bin="$TEST_DIR/no-tmux-bin" c p
+  mkdir -p "$bin"
+  for c in git mktemp basename dirname cat rm sort awk grep sed tr head cut wc mkdir find cp mv; do
+    p="$(command -v "$c")" || continue
+    ln -sf "$p" "$bin/$c"
+  done
+  printf '%s' "$bin"
+}
+
+# Output with ANSI colour sequences removed.
+_plain() {
+  printf '%s' "$1" | sed "s/$(printf '\033')\[[0-9;]*m//g"
 }
 
 # ── _w_repo_info ───────────────────────────────────────────────────
@@ -143,7 +177,7 @@ teardown() {
   [ -d "$WTS/fe/deep/nested" ]
 }
 
-@test "w add: runs setup commands from .worktree.toml" {
+@test "w add: runs setup commands when WORKTREE_ALLOW_REPO_COMMANDS=1" {
   cat > "$REPO/.worktree.toml" <<'TOML'
 [profile.default]
 branches = "*"
@@ -152,8 +186,154 @@ branches = "*"
 run = "touch .setup-marker"
 TOML
   cd "$REPO"
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
   worktree add setup-test 2>/dev/null
   [ -f "$WTS/setup-test/.setup-marker" ]
+}
+
+# ── repo-command opt-in (setup) ────────────────────────────────────
+
+_write_setup_toml() {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch .setup-marker"
+
+[[profile.default.setup]]
+run = "touch .setup-marker-2"
+TOML
+}
+
+@test "opt-in: setup commands are skipped by default" {
+  _write_setup_toml
+  unset WORKTREE_ALLOW_REPO_COMMANDS
+  cd "$REPO"
+  run worktree add gated
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/gated" ]
+  [ ! -e "$WTS/gated/.setup-marker" ]
+  [ ! -e "$WTS/gated/.setup-marker-2" ]
+  [[ "$output" == *"Not running 2 setup command(s)"* ]]
+  [[ "$output" == *"touch .setup-marker"* ]]
+  [[ "$output" == *"WORKTREE_ALLOW_REPO_COMMANDS=1"* ]]
+}
+
+@test "opt-in: values other than 1 do not enable setup commands" {
+  _write_setup_toml
+  cd "$REPO"
+  i=0
+  for v in 0 true yes " 1" "" "11"; do
+    i=$((i + 1))
+    WORKTREE_ALLOW_REPO_COMMANDS="$v"
+    worktree add "gated-$i" >/dev/null 2>&1
+    cd "$REPO"
+    [ -d "$WTS/gated-$i" ]
+  done
+  run find "$WTS" -name '.setup-marker*'
+  [ -z "$output" ]
+}
+
+@test "opt-in: WORKTREE_ALLOW_REPO_COMMANDS=1 runs every setup command" {
+  _write_setup_toml
+  cd "$REPO"
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  run worktree add allowed
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/allowed/.setup-marker" ]
+  [ -f "$WTS/allowed/.setup-marker-2" ]
+  [[ "$output" != *"Not running"* ]]
+}
+
+@test "opt-in: no skip notice when the profile has no setup commands" {
+  printf '[profile.default]\nbranches = "*"\n' > "$REPO/.worktree.toml"
+  cd "$REPO"
+  run worktree add nocmds
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Not running"* ]]
+}
+
+# ── repo-command opt-in (dev: pre + window commands) ───────────────
+
+_fake_tmux() {
+  mkdir -p "$TEST_DIR/bin"
+  cat > "$TEST_DIR/bin/tmux" <<FAKE
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TEST_DIR/tmux.log"
+[ "\$1" = has-session ] && exit 1
+exit 0
+FAKE
+  chmod +x "$TEST_DIR/bin/tmux"
+  : > "$TEST_DIR/tmux.log"
+}
+
+_write_dev_toml() {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.pre]]
+run = "touch .pre-marker"
+
+[[profile.default.windows]]
+name = "server"
+run = "echo window-cmd"
+TOML
+}
+
+@test "opt-in: w dev skips pre and window commands by default" {
+  _write_dev_toml
+  _fake_tmux
+  cd "$REPO"
+  worktree add devgate >/dev/null 2>&1
+  unset WORKTREE_ALLOW_REPO_COMMANDS
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/devgate"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ ! -e "$WTS/devgate/.pre-marker" ]
+  [[ "$output" == *"Not running 1 pre command(s)"* ]]
+  [[ "$output" == *"Not running 1 window command(s)"* ]]
+  grep -q '^new-window .*-n server' "$TEST_DIR/tmux.log"
+  run grep -c 'send-keys' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
+}
+
+@test "opt-in: w dev runs pre and window commands with WORKTREE_ALLOW_REPO_COMMANDS=1" {
+  _write_dev_toml
+  _fake_tmux
+  cd "$REPO"
+  worktree add devallow >/dev/null 2>&1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/devallow"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ -f "$WTS/devallow/.pre-marker" ]
+  [[ "$output" != *"Not running"* ]]
+  grep -q 'send-keys .*echo window-cmd Enter' "$TEST_DIR/tmux.log"
+}
+
+@test "opt-in: w dev aborts when an allowed pre command fails" {
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.pre]]
+run = "false"
+TOML
+  _fake_tmux
+  cd "$REPO"
+  worktree add devfail >/dev/null 2>&1
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/devfail"
+  run worktree dev
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"aborting session"* ]]
+  run grep -c 'new-session' "$TEST_DIR/tmux.log"
+  [ "$output" = "0" ]
 }
 
 # ── worktree shortcut (w <branch>) ─────────────────────────────────
@@ -246,8 +426,12 @@ run = "echo hi"
 TOML
   cd "$REPO"
   worktree add tmux-test 2>/dev/null
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH=/usr/bin:/bin worktree dev 2>&1"
-  [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]
+  local nopath
+  nopath="$(_path_without_tmux)"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$WTS/tmux-test' && PATH='$nopath' worktree dev 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"tmux not installed"* ]]
+  [[ "$output" != *"Starting dev session"* ]]
 }
 
 # ── worktree outside a repo ────────────────────────────────────────
@@ -260,8 +444,11 @@ TOML
 }
 
 @test "w (bare): falls back gracefully outside a git repo" {
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH=/usr/bin:/bin worktree 2>&1"
+  local nopath
+  nopath="$(_path_without_tmux)"
+  run bash -c "source '$REPO_ROOT/w.sh' && cd '$TEST_DIR' && PATH='$nopath' worktree 2>&1"
   [[ "$output" != *"Not in a git repository"* ]]
+  [[ "$output" == *"fzf not installed"* ]]
 }
 
 @test "w ls: lists all worktrees when outside a git repo" {
@@ -276,27 +463,60 @@ TOML
 
 # ── worktree help ──────────────────────────────────────────────────
 
+# The help tests run from TEST_DIR, which is not a git repository, so they do
+# not depend on where bats was started.
+
 @test "w help: shows usage" {
+  cd "$TEST_DIR"
   run worktree help
-  [[ "$output" == *"git worktree helper"* ]]
-  [[ "$output" == *"worktree dev"* ]]
-  [[ "$output" == *"worktree clone"* ]]
-  [[ "$output" == *"w, wt"* ]]
+  [ "$status" -eq 0 ]
+  local plain
+  plain="$(_plain "$output")"
+  [[ "$plain" == *"git worktree helper"* ]]
+  [[ "$plain" == *"worktree dev"* ]]
+  [[ "$plain" == *"worktree clone"* ]]
+  [[ "$plain" == *"w, wt"* ]]
 }
 
 @test "w add --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree add --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Create a new worktree"* ]]
 }
 
 @test "w rm --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree rm --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Remove a worktree"* ]]
 }
 
 @test "w dev --help: shows subcommand help" {
+  cd "$TEST_DIR"
   run worktree dev --help
+  [ "$status" -eq 0 ]
   [[ "$output" == *"Launch a tmux dev session"* ]]
+}
+
+@test "w cd --help: shows subcommand help" {
+  cd "$TEST_DIR"
+  run worktree cd --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Change directory"* ]]
+}
+
+@test "w ls --help: shows subcommand help" {
+  cd "$TEST_DIR"
+  run worktree ls --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"List worktrees"* ]]
+}
+
+@test "help tests: TEST_DIR is not inside a git repository" {
+  cd "$TEST_DIR"
+  run git rev-parse --git-dir
+  [ "$status" -ne 0 ]
 }
 
 # ── worktree clone ─────────────────────────────────────────────────
@@ -351,27 +571,27 @@ TOML
 }
 
 @test "_w_resolve_pr_url: errors when gh not installed" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: normalizes /pulls/ to /pull/ in error message" {
-  # gh is not available so we can only confirm the URL is normalised
+  # gh is made unavailable (GITHUB_CMD points nowhere) so we can only confirm the URL is normalised
   # before gh is called (visible in the error output)
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pulls/42' 2>&1"
   # Returns non-zero (gh not found), but must NOT output /pulls/ in any
   # gh-related message — the URL was already normalised before that call
   [[ "$output" != *"/pulls/"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts http:// PR URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'http://github.com/org/repo/pull/1' 2>&1"
   # gh not installed, but we get the gh error (not "not a PR URL")
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
 @test "_w_resolve_pr_url: accepts trailing-slash URL" {
-  run bash -c "source '$REPO_ROOT/w.sh' && PATH=/usr/bin:/bin _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
+  run bash -c "source '$REPO_ROOT/w.sh' && GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url 'https://github.com/org/repo/pull/42/' 2>&1"
   [[ "$output" == *"gh CLI not installed"* ]]
 }
 
@@ -433,14 +653,138 @@ TOML
 
 @test "w add: PR URL without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree add 'https://github.com/org/repo/pull/1' 2>&1"
+  GITHUB_CMD=wt-test-no-such-gh run worktree add 'https://github.com/org/repo/pull/1'
+  [ "$status" -eq 1 ]
   [[ "$output" == *"gh CLI not installed"* ]]
+  # fails closed: no worktree named after the URL
+  [ ! -e "$WTS/https:" ]
+  run git -C "$REPO" worktree list
+  [[ "$output" != *"github.com"* ]]
 }
 
 @test "w <pr-url>: PR URL shortcut without gh CLI prints error" {
   cd "$REPO"
-  run bash -c "source '$REPO_ROOT/w.sh' && cd '$REPO' && PATH=/usr/bin:/bin worktree 'https://github.com/org/repo/pull/1' 2>&1"
+  GITHUB_CMD=wt-test-no-such-gh run worktree 'https://github.com/org/repo/pull/1'
+  [ "$status" -eq 1 ]
+  [ ! -e "$WTS/https:" ]
   [[ "$output" == *"gh CLI not installed"* ]]
+}
+
+# ── gh command override (GITHUB_CMD, then GH_CMD, then gh) ─────────
+
+_fake_gh() {
+  # _fake_gh <name> <branch-to-print>
+  mkdir -p "$TEST_DIR/bin"
+  cat > "$TEST_DIR/bin/$1" <<FAKE
+#!/bin/sh
+printf '%s %s\n' "$1" "\$*" >> "$TEST_DIR/gh.log"
+printf '%s' "$2"
+FAKE
+  chmod +x "$TEST_DIR/bin/$1"
+}
+
+_gh_setup() {
+  _fake_gh fake-gh-a branch-a
+  _fake_gh fake-gh-b branch-b
+  _fake_gh gh branch-plain
+  : > "$TEST_DIR/gh.log"
+  PATH="$TEST_DIR/bin:$PATH"
+  unset GITHUB_CMD GH_CMD
+}
+
+@test "gh override: GITHUB_CMD wins over GH_CMD" {
+  _gh_setup
+  GITHUB_CMD=fake-gh-a GH_CMD=fake-gh-b run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ "$output" = "branch-a" ]
+  run grep -c '^fake-gh-b' "$TEST_DIR/gh.log"
+  [ "$output" = "0" ]
+}
+
+@test "gh override: GH_CMD is used when GITHUB_CMD is unset" {
+  _gh_setup
+  GH_CMD=fake-gh-b run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ "$output" = "branch-b" ]
+}
+
+@test "gh override: empty GITHUB_CMD counts as unset" {
+  _gh_setup
+  GITHUB_CMD='' GH_CMD=fake-gh-b run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ "$output" = "branch-b" ]
+}
+
+@test "gh override: falls back to plain gh when neither is set" {
+  _gh_setup
+  run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ "$output" = "branch-plain" ]
+  grep -q '^gh pr view' "$TEST_DIR/gh.log"
+}
+
+@test "gh override: empty GITHUB_CMD and GH_CMD fall back to gh" {
+  _gh_setup
+  GITHUB_CMD='' GH_CMD='' run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ "$output" = "branch-plain" ]
+}
+
+@test "gh override: value is a command line split into words" {
+  _gh_setup
+  GITHUB_CMD="fake-gh-a --profile work" run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  grep -q '^fake-gh-a --profile work pr view ' "$TEST_DIR/gh.log"
+}
+
+@test "gh override: passes the normalised PR URL and an explicit -R owner/repo" {
+  _gh_setup
+  GITHUB_CMD=fake-gh-a run _w_resolve_pr_url 'https://github.com/acme/widgets/pulls/7/'
+  [ "$status" -eq 0 ]
+  grep -qF 'fake-gh-a pr view https://github.com/acme/widgets/pull/7 -R acme/widgets --json headRefName' "$TEST_DIR/gh.log"
+}
+
+@test "gh override: a missing override command fails closed and is named" {
+  _gh_setup
+  GITHUB_CMD=wt-test-no-such-gh GH_CMD=fake-gh-b run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"wt-test-no-such-gh"* ]]
+  [[ "$output" == *"gh CLI not installed"* ]]
+  [ ! -s "$TEST_DIR/gh.log" ]
+}
+
+@test "gh override: plain gh missing from PATH is reported" {
+  mkdir -p "$TEST_DIR/empty-bin"
+  run env -i PATH="$TEST_DIR/empty-bin" "$BASH" -c ". '$REPO_ROOT/w.sh'; _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7' 2>&1"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"gh CLI not installed"* ]]
+  [[ "$output" == *"'gh' not found"* ]]
+}
+
+@test "gh override: empty output from gh is a resolve failure" {
+  _gh_setup
+  _fake_gh fake-gh-empty ""
+  GITHUB_CMD=fake-gh-empty run _w_resolve_pr_url 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Failed to resolve PR URL"* ]]
+}
+
+@test "gh override: w add stops when gh returns no branch" {
+  _gh_setup
+  _fake_gh fake-gh-empty ""
+  cd "$REPO"
+  GITHUB_CMD=fake-gh-empty run worktree add 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Failed to resolve PR URL"* ]]
+  [ ! -e "$WTS/https:" ]
+}
+
+@test "gh override: w add resolves the PR branch through the override" {
+  _gh_setup
+  cd "$REPO"
+  GITHUB_CMD=fake-gh-a run worktree add 'https://github.com/acme/widgets/pull/7'
+  [ "$status" -eq 0 ]
+  [ -d "$WTS/branch-a" ]
 }
 
 # ── _w_resolve_branch_url ─────────────────────────────────────────
@@ -545,16 +889,19 @@ TOML
 # ── w add --help updated content ──────────────────────────────────
 
 @test "w add --help: mentions github-pr-url" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"github-pr-url"* ]]
 }
 
 @test "w add --help: mentions github-branch-url" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"github-branch-url"* ]]
 }
 
 @test "w add --help: shows examples section" {
+  cd "$TEST_DIR"
   run worktree add --help
   [[ "$output" == *"Examples:"* ]]
 }

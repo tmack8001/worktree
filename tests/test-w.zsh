@@ -117,10 +117,34 @@ setup_repo() {
   echo "$repo_dir"
 }
 
+# Any tmux a test reaches talks to a private server under TEST_ROOT, never the
+# user's (TMUX_TMPDIR picks the socket dir; TMUX would point at the current
+# server, so drop it). cleanup stops that server: a detached tmux server keeps
+# the caller's output pipe open and would hang `make test | ...`.
+REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+mkdir -p "$TEST_ROOT/tmux"
+export TMUX_TMPDIR="$TEST_ROOT/tmux"
+unset TMUX
+
 cleanup() {
-  rm -rf "$TEST_ROOT"
+  if [[ -n "$REAL_TMUX" ]]; then
+    TMUX_TMPDIR="$TEST_ROOT/tmux" "$REAL_TMUX" kill-server >/dev/null 2>&1 || true
+  fi
+  cd / && rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
+
+# A PATH directory with only the commands w.zsh needs, so `command -v tmux`
+# fails even where tmux is installed next to git.
+path_without_tmux() {
+  local bin="$TEST_ROOT/no-tmux-bin" c p
+  mkdir -p "$bin"
+  for c in git mktemp basename dirname cat rm sort awk grep sed tr head cut wc mkdir find cp mv; do
+    p=$(command -v "$c") || continue
+    ln -sf "$p" "$bin/$c"
+  done
+  print -r -- "$bin"
+}
 
 # ── Test groups ────────────────────────────────────────────────────
 
@@ -399,6 +423,23 @@ test_subcommand_help() {
     output=$(w dev --help 2>&1)
     assert_contains "dev --help" "$output" "Launch a tmux dev session"
   )
+
+  # The same help outside any git repository (TEST_ROOT is not one).
+  (
+    cd "$TEST_ROOT"
+    local output
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+      fail "TEST_ROOT is inside a git repository"
+    fi
+    for sub in add rm cd ls dev; do
+      output=$(w "$sub" --help 2>&1)
+      if [[ "$output" == *"Not in a git repository"* || "$output" != *[Uu]sage* ]]; then
+        fail "$sub --help outside a repo (got: $output)"
+      else
+        pass "$sub --help outside a repo"
+      fi
+    done
+  )
 }
 
 test_load_config_profile_matching() {
@@ -591,7 +632,7 @@ TOML
 
   (
     cd "$repo"
-    w add setup-test >/dev/null 2>&1
+    WORKTREE_ALLOW_REPO_COMMANDS=1 worktree add setup-test >/dev/null 2>&1
   )
 
   local wt="$TEST_ROOT/setup-run-worktrees/setup-test"
@@ -697,15 +738,12 @@ TOML
     w add tmux-test >/dev/null 2>&1
     cd "$TEST_ROOT/dev-notmux-worktrees/tmux-test"
 
-    # Temporarily hide tmux from PATH
-    local output
-    output=$(PATH="/usr/bin:/bin" w dev 2>&1)
-    if [[ "$output" == *"tmux not installed"* || "$output" == *"Starting dev session"* ]]; then
-      # Either tmux isn't available (expected) or it is (also fine)
-      pass "dev handles tmux availability correctly"
-    else
-      fail "dev unexpected output: $output"
-    fi
+    # Hide tmux from PATH (a PATH with only the needed tools, not /usr/bin)
+    local output nopath rc
+    nopath=$(path_without_tmux)
+    output=$(PATH="$nopath" w dev 2>&1); rc=$?
+    assert_exit_code "dev without tmux fails" "1" "$rc"
+    assert_contains "dev without tmux says so" "$output" "tmux not installed"
   )
 }
 
@@ -977,21 +1015,21 @@ test_resolve_pr_url() {
   # Valid PR URL patterns — without gh available all should fail with the gh error,
   # not with "not a PR URL" (i.e. pattern matching must succeed).
   local output
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
+  output=$(GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url "https://github.com/org/repo/pull/42" 2>&1)
   assert_contains "https pull url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   assert_contains "https pulls url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
+  output=$(GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url "https://github.com/org/repo/pull/42/" 2>&1)
   assert_contains "trailing slash url reaches gh check" "$output" "gh CLI not installed"
 
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
+  output=$(GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url "http://github.com/org/repo/pull/1" 2>&1)
   assert_contains "http pull url reaches gh check" "$output" "gh CLI not installed"
 
   # /pulls/ must be normalised to /pull/ before gh is called —
   # the gh error message (or "Failed to resolve") must not contain /pulls/
-  output=$(PATH="/usr/bin:/bin" _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
+  output=$(GITHUB_CMD=wt-test-no-such-gh _w_resolve_pr_url "https://github.com/org/repo/pulls/42" 2>&1)
   if [[ "$output" != *"/pulls/"* ]]; then
     pass "/pulls/ normalised to /pull/ before gh call"
   else
@@ -1084,7 +1122,7 @@ test_add_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w add "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(GITHUB_CMD=wt-test-no-such-gh w add "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w add pr-url without gh errors" "$output" "gh CLI not installed"
   )
 }
@@ -1097,7 +1135,7 @@ test_shortcut_pr_url_no_gh() {
   (
     cd "$repo"
     local output
-    output=$(PATH="/usr/bin:/bin" w "https://github.com/org/repo/pull/1" 2>&1)
+    output=$(GITHUB_CMD=wt-test-no-such-gh w "https://github.com/org/repo/pull/1" 2>&1)
     assert_contains "w pr-url shortcut without gh errors" "$output" "gh CLI not installed"
   )
 }
@@ -1107,7 +1145,7 @@ test_shortcut_pr_url_no_gh() {
 test_add_help_pr_url() {
   echo "── w add --help (PR URL / branch URL content) ──"
   local output
-  output=$(w add --help 2>&1)
+  output=$(cd "$TEST_ROOT" && w add --help 2>&1)
   assert_contains "add help mentions github-pr-url" "$output" "github-pr-url"
   assert_contains "add help mentions github-branch-url" "$output" "github-branch-url"
   assert_contains "add help shows Examples section" "$output" "Examples:"
@@ -1266,6 +1304,202 @@ TOML
   )
 }
 
+# ── Repo-command opt-in ───────────────────────────────────────────
+
+test_setup_skipped_by_default() {
+  echo "── repo commands: setup skipped without opt-in ──"
+  local repo
+  repo=$(setup_repo "optin-setup")
+
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.setup]]
+run = "touch .setup-marker"
+TOML
+
+  (
+    cd "$repo"
+    unset WORKTREE_ALLOW_REPO_COMMANDS
+    local output wt="$TEST_ROOT/optin-setup-worktrees"
+    output=$(worktree add gated 2>&1)
+    assert_dir_exists "worktree still created" "$wt/gated"
+    if [[ ! -e "$wt/gated/.setup-marker" ]]; then
+      pass "setup command not run by default"
+    else
+      fail "setup command ran without opt-in"
+    fi
+    assert_contains "skip notice" "$output" "Not running 1 setup command(s)"
+    assert_contains "skip notice lists the command" "$output" "touch .setup-marker"
+    assert_contains "skip notice names the opt-in" "$output" "WORKTREE_ALLOW_REPO_COMMANDS=1"
+
+    cd "$repo"
+    local v i=0
+    for v in 0 true yes " 1" "" 11; do
+      (( i++ ))
+      WORKTREE_ALLOW_REPO_COMMANDS="$v" worktree add "other-$i" >/dev/null 2>&1
+      cd "$repo"
+    done
+    if [[ -z "$(find "$wt" -name .setup-marker)" ]]; then
+      pass "values other than 1 do not opt in"
+    else
+      fail "a value other than 1 enabled setup commands"
+    fi
+
+    WORKTREE_ALLOW_REPO_COMMANDS=1 worktree add allowed >/dev/null 2>&1
+    if [[ -f "$wt/allowed/.setup-marker" ]]; then
+      pass "WORKTREE_ALLOW_REPO_COMMANDS=1 runs setup"
+    else
+      fail "WORKTREE_ALLOW_REPO_COMMANDS=1 did not run setup"
+    fi
+  )
+}
+
+_zt_fake_tmux() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/tmux" <<FAKE
+#!/bin/sh
+printf '%s\n' "\$*" >> "$bin/tmux.log"
+[ "\$1" = has-session ] && exit 1
+exit 0
+FAKE
+  chmod +x "$bin/tmux"
+  : > "$bin/tmux.log"
+}
+
+test_dev_commands_gated() {
+  echo "── repo commands: dev pre/window gated ──"
+  local repo
+  repo=$(setup_repo "optin-dev")
+
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.pre]]
+run = "touch .pre-marker"
+
+[[profile.default.windows]]
+name = "server"
+run = "echo window-cmd"
+TOML
+
+  local bin="$TEST_ROOT/optin-dev-bin"
+  _zt_fake_tmux "$bin"
+
+  (
+    cd "$repo"
+    worktree add devgate >/dev/null 2>&1
+    local wt="$TEST_ROOT/optin-dev-worktrees/devgate"
+    cd "$wt"
+    unset WORKTREE_ALLOW_REPO_COMMANDS
+    local output rc
+    output=$(PATH="$bin:$PATH" worktree dev 2>&1); rc=$?
+    assert_exit_code "dev without opt-in succeeds" "0" "$rc"
+    [[ ! -e "$wt/.pre-marker" ]] && pass "pre command not run by default" || fail "pre command ran without opt-in"
+    assert_contains "pre skip notice" "$output" "Not running 1 pre command(s)"
+    assert_contains "window skip notice" "$output" "Not running 1 window command(s)"
+    if grep -q '^new-window .*-n server' "$bin/tmux.log" && ! grep -q 'send-keys' "$bin/tmux.log"; then
+      pass "window created without typing its command"
+    else
+      fail "window command was sent without opt-in"
+    fi
+
+    : > "$bin/tmux.log"
+    output=$(WORKTREE_ALLOW_REPO_COMMANDS=1 PATH="$bin:$PATH" worktree dev 2>&1); rc=$?
+    assert_exit_code "dev with opt-in succeeds" "0" "$rc"
+    [[ -f "$wt/.pre-marker" ]] && pass "pre command runs with opt-in" || fail "pre command did not run with opt-in"
+    if grep -q 'send-keys .*echo window-cmd Enter' "$bin/tmux.log"; then
+      pass "window command sent with opt-in"
+    else
+      fail "window command not sent with opt-in"
+    fi
+  )
+}
+
+# ── gh command override ───────────────────────────────────────────
+
+_zt_fake_gh() {
+  # _zt_fake_gh <bin> <name> <branch-to-print>
+  local bin="$1" name="$2" out="$3"
+  mkdir -p "$bin"
+  cat > "$bin/$name" <<FAKE
+#!/bin/sh
+printf '%s %s\n' "$name" "\$*" >> "$bin/gh.log"
+printf '%s' "$out"
+FAKE
+  chmod +x "$bin/$name"
+}
+
+test_gh_override() {
+  echo "── gh override (GITHUB_CMD, GH_CMD, gh) ──"
+  local bin="$TEST_ROOT/gh-bin" url="https://github.com/acme/widgets/pull/7"
+  _zt_fake_gh "$bin" fake-gh-a branch-a
+  _zt_fake_gh "$bin" fake-gh-b branch-b
+  _zt_fake_gh "$bin" gh branch-plain
+  _zt_fake_gh "$bin" fake-gh-empty ""
+
+  (
+    unset GITHUB_CMD GH_CMD
+    PATH="$bin:$PATH"
+    local out rc
+
+    out=$(GITHUB_CMD=fake-gh-a GH_CMD=fake-gh-b _w_resolve_pr_url "$url" 2>&1)
+    assert_eq "GITHUB_CMD wins over GH_CMD" "branch-a" "$out"
+
+    out=$(GH_CMD=fake-gh-b _w_resolve_pr_url "$url" 2>&1)
+    assert_eq "GH_CMD used when GITHUB_CMD unset" "branch-b" "$out"
+
+    out=$(GITHUB_CMD= GH_CMD=fake-gh-b _w_resolve_pr_url "$url" 2>&1)
+    assert_eq "empty GITHUB_CMD counts as unset" "branch-b" "$out"
+
+    out=$(_w_resolve_pr_url "$url" 2>&1)
+    assert_eq "falls back to plain gh" "branch-plain" "$out"
+
+    out=$(GITHUB_CMD= GH_CMD= _w_resolve_pr_url "$url" 2>&1)
+    assert_eq "empty GITHUB_CMD and GH_CMD fall back to gh" "branch-plain" "$out"
+
+    : > "$bin/gh.log"
+    GITHUB_CMD="fake-gh-a --profile work" _w_resolve_pr_url "https://github.com/acme/widgets/pulls/7/" >/dev/null 2>&1
+    assert_eq "command line split into words, -R passed, URL normalised" \
+      "fake-gh-a --profile work pr view https://github.com/acme/widgets/pull/7 -R acme/widgets --json headRefName --jq .headRefName" \
+      "$(cat "$bin/gh.log")"
+
+    : > "$bin/gh.log"
+    out=$(GITHUB_CMD=wt-test-no-such-gh GH_CMD=fake-gh-b _w_resolve_pr_url "$url" 2>&1); rc=$?
+    assert_exit_code "missing override command returns 2" "2" "$rc"
+    assert_contains "missing override command is named" "$out" "wt-test-no-such-gh"
+    assert_eq "missing override does not fall through to GH_CMD" "" "$(cat "$bin/gh.log")"
+
+    out=$(GITHUB_CMD=fake-gh-empty _w_resolve_pr_url "$url" 2>&1); rc=$?
+    assert_exit_code "empty gh output returns 2" "2" "$rc"
+    assert_contains "empty gh output reported" "$out" "Failed to resolve PR URL"
+  )
+
+  # plain gh absent from PATH (no external commands are needed before the check)
+  local out
+  out=$(env -i PATH="$TEST_ROOT/empty-bin" "$(command -v zsh)" -fc "source '$SCRIPT_DIR/../w.zsh'; _w_resolve_pr_url '$url'" 2>&1)
+  assert_contains "plain gh missing is reported" "$out" "'gh' not found"
+
+  local repo
+  repo=$(setup_repo "gh-override-add")
+  (
+    cd "$repo"
+    unset GITHUB_CMD GH_CMD
+    PATH="$bin:$PATH"
+    GITHUB_CMD=fake-gh-a worktree add "$url" >/dev/null 2>&1
+    assert_dir_exists "w add resolves PR via override" "$TEST_ROOT/gh-override-add-worktrees/branch-a"
+
+    cd "$repo"
+    local rc
+    GITHUB_CMD=fake-gh-empty worktree add "$url" >/dev/null 2>&1; rc=$?
+    assert_exit_code "w add stops on unresolved PR URL" "1" "$rc"
+    assert_dir_not_exists "no worktree named after the URL" "$TEST_ROOT/gh-override-add-worktrees/https:"
+  )
+}
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 echo ""
@@ -1319,6 +1553,9 @@ test_add_help_pr_url
 test_help_pr_url_entry
 test_bootstrap_deps
 test_dep_dirs_toml
+test_setup_skipped_by_default
+test_dev_commands_gated
+test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────
 

@@ -8,15 +8,31 @@ Two variants are available:
 - `w.zsh` — full-featured, requires zsh
 - `w.sh` — POSIX sh compatible, works with bash, dash, and others
 
+> [!WARNING]
+> **Security: `.worktree.toml` is code from the repository.** A committed `.worktree.toml` can contain
+> `setup`, `pre` and window `run` commands written by anyone who can push to that repo (or open a PR you check
+> out). Since v0.1.1 worktree **does not run them** unless you opt in with `WORKTREE_ALLOW_REPO_COMMANDS=1`;
+> without it, the commands are printed and skipped. Only opt in for repos you trust, after reading their
+> `.worktree.toml`, and prefer scoping it to one command (`WORKTREE_ALLOW_REPO_COMMANDS=1 w add my-branch`)
+> over exporting it in your shell rc. See [Running repo commands](#running-repo-commands-opt-in).
+>
+> **Installer.** Read `install.sh` before piping it to a shell. It downloads a pinned release (`v0.1.1`), not
+> `main`; it never copies files from your current directory (before v0.1.1, `curl ... | sh` run in a directory
+> containing a `w.sh`/`w.zsh` installed that file instead).
+
 ## Install
 
 ### One-liner
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tmack8001/worktree/refs/heads/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tmack8001/worktree/v0.1.1/install.sh | sh
 ```
 
-The installer auto-detects your shell and adds a source line to your rc file.
+The installer picks the variant from your login shell (`$SHELL`: zsh gets `w.zsh`, anything else `w.sh`) and adds
+a source line to your rc file (`~/.zshrc`; `~/.bashrc` or `~/.bash_profile` for bash; `~/.profile` otherwise).
+
+Piped from `curl`, it downloads `w.sh`/`w.zsh` at the pinned release tag. Run from a clone (`./install.sh`), it copies
+the files next to `install.sh`. Files in your current directory are never used.
 
 ### Options
 
@@ -24,8 +40,13 @@ The installer auto-detects your shell and adds a source line to your rc file.
 ./install.sh --zsh              # force zsh variant
 ./install.sh --sh               # force POSIX sh variant
 ./install.sh --prefix ~/.bin    # custom install directory
+./install.sh --rc ~/.zshrc      # rc file to add the source line to
+./install.sh --ref main         # download another ref (tag, branch or commit) instead of the pinned release
+./install.sh --remote           # download even when run from a clone
 ./install.sh --dry-run          # preview without making changes
 ```
+
+`WORKTREE_REF=<ref>` is equivalent to `--ref`. Tracking `main` means installing unreleased code; prefer a tag.
 
 ### Manual
 
@@ -55,6 +76,9 @@ unalias wt   # keep only w
 ### Dependencies
 
 - `git` (required)
+- `gh` (optional — resolving GitHub PR URLs). worktree runs `${GITHUB_CMD:-${GH_CMD:-gh}}`: `GITHUB_CMD` if set and
+  not empty, else `GH_CMD`, else `gh`. The value is a command line split on spaces, so a wrapper such as `ghid`
+  can pick the identity; the repo is always passed explicitly as `-R owner/repo`.
 - `zsh` or POSIX `sh` / `bash` (required)
 - `fzf` (optional — interactive worktree switcher)
 - `tmux` (optional — `w dev` sessions)
@@ -140,15 +164,31 @@ run = "cp .env.example .env"
 run = "npm install"
 ```
 
-Setup commands run once when you `worktree add <branch>`. That's all you need to get started.
+Setup commands run once when you `worktree add <branch>`, **if you have opted in** (see below).
+
+### Running repo commands (opt-in)
+
+`setup`, `pre` and window `run` commands come from the repository's `.worktree.toml`, so worktree treats them as
+untrusted by default: it lists them and skips them. The worktree is still created, dependencies are still
+bootstrapped and `worktree dev` still creates the tmux windows (without typing their commands).
+
+To run them, set `WORKTREE_ALLOW_REPO_COMMANDS=1` (exactly `1`; any other value is off):
+
+```sh
+WORKTREE_ALLOW_REPO_COMMANDS=1 w add fe/my-feature   # this command only
+WORKTREE_ALLOW_REPO_COMMANDS=1 w dev
+```
+
+Read the repo's `.worktree.toml` first. Exporting the variable in your rc file turns it on for every repo you
+touch, including ones you clone later; a per-repo trust model is planned for 1.0.
 
 ### Config lifecycle
 
 | Phase | When it runs | What it's for |
 |-------|-------------|---------------|
-| `setup` | Once, during `worktree add` | Environment config, initial installs |
-| `pre` | Every `worktree dev`, before tmux | Ensure deps are current, build steps. Aborts on failure. |
-| `windows` | Every `worktree dev` | Long-running processes (dev servers, watchers, proxies) |
+| `setup` | Once, during `worktree add` (opt-in) | Environment config, initial installs |
+| `pre` | Every `worktree dev`, before tmux (opt-in) | Ensure deps are current, build steps. Aborts on failure. |
+| `windows` | Every `worktree dev` (commands opt-in) | Long-running processes (dev servers, watchers, proxies) |
 
 ### Profile matching
 
@@ -219,10 +259,56 @@ Or explicitly via
 
 ```
 bats tests/test-w.bats # BATS suite (w.sh, requires bats-core)
+bats tests/test-install.bats # BATS suite (install.sh; fake curl, throwaway HOME)
+bats tests/test-release.bats # BATS suite (scripts/build-release.sh; needs GNU tar)
 zsh tests/test-w.zsh   # zsh-specific suite (w.zsh)
 ```
 
-Install test dependencies with `make deps` (requires Homebrew).
+Install test dependencies with `make deps` (requires Homebrew). The tests never start a real tmux server.
+`make lint` runs shellcheck on `w.sh`, `install.sh` and the bats suites.
+
+## Releasing
+
+Releases are made only by the `release` workflow (`.github/workflows/release.yml`), never by pushing a tag. In
+GitHub: Actions, **release**, **Run workflow** on branch `main`, with:
+
+- `version`: `X.Y.Z` (no `v`);
+- `commit` (optional): a full 40-hex commit on `main` to release; empty means the `main` commit you dispatch from.
+
+Before anything is published the workflow checks that it runs on `main` and that both commits are on `main`, that
+`version` is `X.Y.Z`, that neither the tag `vX.Y.Z` nor a release of that name exists, and that `CHANGELOG.md` has a
+`## [X.Y.Z]` section (used as the release notes). It runs the CI gates (lint, bats and zsh suites on ubuntu and
+macOS). For the dispatching commit it also requires `DEFAULT_REF="vX.Y.Z"` in `install.sh`. It builds
+`worktree-X.Y.Z.tar.gz` and `SHA256SUMS` from the release commit's tree with `scripts/build-release.sh`, twice, and
+requires identical bytes. Then it waits for approval of the `release` environment, attests build provenance, creates
+the tag `vX.Y.Z` at the release commit and publishes the release with both files.
+
+For an older `commit` the files come from that commit while the workflow and build script come from `main`. Two
+checks cannot hold for such a tree and are skipped, and the job summary says so: the `DEFAULT_REF` check when that
+`install.sh` has none, and that tree's own test suite.
+
+The intended first releases, after the v0.1.1 hotfix is merged to `main`:
+
+1. `version=0.1.0`, `commit=d8689577fe2adce8a35bb06be92482fed98ddd68` (the `main` commit before the hotfix);
+2. `version=0.1.1`, no `commit`.
+
+Build the same files locally (GNU tar required; on macOS `brew install gnu-tar`):
+
+```sh
+sh scripts/build-release.sh 0.1.1 dist            # from HEAD
+sh scripts/build-release.sh 0.1.0 dist d8689577fe2adce8a35bb06be92482fed98ddd68
+```
+
+To verify a download, put `worktree-X.Y.Z.tar.gz` and `SHA256SUMS` from the release in one directory and run:
+
+```sh
+grep ' worktree-X.Y.Z.tar.gz$' SHA256SUMS | sha256sum -c -     # macOS: shasum -a 256 -c -
+gh attestation verify worktree-X.Y.Z.tar.gz --repo tmack8001/worktree
+```
+
+The checksum only shows the file matches `SHA256SUMS`; the attestation shows it was built by this repository's
+workflow. Rebuilding with `scripts/build-release.sh` from the same commit should give the same bytes with GNU tar
+and GNU gzip (checked on Linux only; Apple's gzip compresses differently).
 
 ## Demo
 

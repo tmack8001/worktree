@@ -1,0 +1,27 @@
+version: 2
+# Weekly updates of the GitHub Actions pinned by commit SHA in .github/workflows, mirroring ghid's
+# .github/dependabot.yml (playbook decision pin-actions-and-bases-by-digest-and-automate-updates).
+# Minor and patch updates are grouped into one pull request; a major gets its own.
+# `cooldown: default-days: 7`: a release younger than a week is not proposed, so a hijacked brand-new upstream
+# release has a week to be noticed and yanked first (security updates ignore the cooldown, by Dependabot's design).
+# There is no auto-merge workflow here: these pull requests change .github/ files, which the owner's policy never
+# auto-merges, so each one waits for a human.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:17"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "ci"
+      include: "scope"
