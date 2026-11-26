@@ -20,6 +20,8 @@ setup_file() {
 }
 
 setup() {
+  # SCRIPT_SH: the shell under test (TEST_SH, default sh)
+  load shell-under-test
   [ -n "$GTAR" ] || { echo "GNU tar (tar or gtar) is required" >&2; return 1; }
   TEST_DIR="$(mktemp -d)"
   TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
@@ -58,7 +60,7 @@ _commit() {
 }
 
 _build() { # _build <outdir> [<version> [<commit>]]
-  sh "$FIX/scripts/build-release.sh" "${2:-1.2.3}" "$1" ${3:+"$3"}
+  $SCRIPT_SH "$FIX/scripts/build-release.sh" "${2:-1.2.3}" "$1" ${3:+"$3"}
 }
 
 _sha256_check() { # verify SHA256SUMS inside a dir with whatever tool exists
@@ -156,16 +158,16 @@ _sha256_check() { # verify SHA256SUMS inside a dir with whatever tool exists
 
 @test "build-release: rejects bad versions" {
   for v in v1.2.3 1.2 1.2.3.4 1.2.3-rc.1 1.2.3+meta 01.2.3 x.y.z ""; do
-    run sh "$FIX/scripts/build-release.sh" "$v" "$TEST_DIR/out"
+    run $SCRIPT_SH "$FIX/scripts/build-release.sh" "$v" "$TEST_DIR/out"
     [ "$status" -eq 1 ] || { echo "accepted '$v'"; false; }
   done
   [ ! -e "$TEST_DIR/out/SHA256SUMS" ]
 }
 
 @test "build-release: wrong argument count is a usage error" {
-  run sh "$FIX/scripts/build-release.sh" 1.2.3
+  run $SCRIPT_SH "$FIX/scripts/build-release.sh" 1.2.3
   [ "$status" -eq 2 ]
-  run sh "$FIX/scripts/build-release.sh" 1.2.3 "$TEST_DIR/out" HEAD extra
+  run $SCRIPT_SH "$FIX/scripts/build-release.sh" 1.2.3 "$TEST_DIR/out" HEAD extra
   [ "$status" -eq 2 ]
 }
 
@@ -206,7 +208,7 @@ _sha256_check() { # verify SHA256SUMS inside a dir with whatever tool exists
   if ! git -C "$REPO_ROOT" rev-parse --verify --quiet HEAD >/dev/null; then
     skip "not a git checkout"
   fi
-  run sh "$REPO_ROOT/scripts/build-release.sh" 0.0.0 "$TEST_DIR/self"
+  run $SCRIPT_SH "$REPO_ROOT/scripts/build-release.sh" 0.0.0 "$TEST_DIR/self"
   [ "$status" -eq 0 ]
   run _sha256_check "$TEST_DIR/self"
   [ "$status" -eq 0 ]

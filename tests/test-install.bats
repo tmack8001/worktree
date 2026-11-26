@@ -12,6 +12,8 @@ setup_file() {
 }
 
 setup() {
+  # SCRIPT_SH: the shell under test (TEST_SH, default sh)
+  load shell-under-test
   TEST_DIR="$(mktemp -d)"
   TEST_DIR="$(cd "$TEST_DIR" && pwd -P)"
   export TEST_DIR
@@ -55,7 +57,7 @@ teardown() {
 
 # Simulate `curl .../install.sh | sh`: $0 is the shell, cwd is untrusted.
 piped_install() {
-  (cd "$TEST_DIR/cwd" && sh -s -- --prefix "$PREFIX" "$@" < "$REPO_ROOT/install.sh")
+  (cd "$TEST_DIR/cwd" && $SCRIPT_SH -s -- --prefix "$PREFIX" "$@" < "$REPO_ROOT/install.sh")
 }
 
 # ── source selection ───────────────────────────────────────────────
@@ -86,7 +88,7 @@ piped_install() {
 
 @test "install (clone): copies the variant next to install.sh, from any cwd" {
   cd "$TEST_DIR/cwd"
-  SHELL=/bin/bash run sh "$REPO_ROOT/install.sh" --prefix "$PREFIX"
+  SHELL=/bin/bash run $SCRIPT_SH "$REPO_ROOT/install.sh" --prefix "$PREFIX"
   [ "$status" -eq 0 ]
   cmp -s "$REPO_ROOT/w.sh" "$PREFIX/w.sh"
   [ ! -s "$TEST_DIR/curl.log" ]
@@ -95,7 +97,7 @@ piped_install() {
 
 @test "install (clone): --remote downloads instead of copying" {
   cd "$TEST_DIR/cwd"
-  SHELL=/bin/bash run sh "$REPO_ROOT/install.sh" --prefix "$PREFIX" --remote
+  SHELL=/bin/bash run $SCRIPT_SH "$REPO_ROOT/install.sh" --prefix "$PREFIX" --remote
   [ "$status" -eq 0 ]
   grep -q '^# downloaded from ' "$PREFIX/w.sh"
 }
@@ -162,7 +164,7 @@ piped_install() {
 
 @test "install: --prefix without a value is an error" {
   cd "$TEST_DIR/cwd"
-  SHELL=/bin/bash run sh "$REPO_ROOT/install.sh" --prefix
+  SHELL=/bin/bash run $SCRIPT_SH "$REPO_ROOT/install.sh" --prefix
   [ "$status" -eq 1 ]
   [[ "$output" == *"--prefix requires a value"* ]]
 }
@@ -205,7 +207,7 @@ piped_install() {
 }
 
 @test "install: unset SHELL falls back to the sh variant" {
-  run env -u SHELL HOME="$HOME" PATH="$PATH" sh -c "cd '$TEST_DIR/cwd' && sh -s -- --prefix '$PREFIX' --dry-run < '$REPO_ROOT/install.sh'"
+  run env -u SHELL HOME="$HOME" PATH="$PATH" sh -c "cd '$TEST_DIR/cwd' && $SCRIPT_SH -s -- --prefix '$PREFIX' --dry-run < '$REPO_ROOT/install.sh'"
   [ "$status" -eq 0 ]
   [[ "$output" == *"variant : sh"* ]]
 }
