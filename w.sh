@@ -97,6 +97,30 @@ _w_worktree_branch() (
   esac
 )
 
+# ── tmux session names ─────────────────────────────────────────────
+#
+# tmux does not store a session name as given: it replaces '.' and ':' with
+# '_' and escapes '\', '$' and control characters (and, outside a UTF-8
+# locale, replaces non-ASCII characters). A target like `=repo-v1.2` then names
+# no session (worse, `.` and `:` split a target into window and pane), so the
+# name used for new-session and every later target must be one tmux stores
+# unchanged. _w_tmux_name makes it one: '.' and ':' become '_' as tmux does,
+# and so does every other byte that is not printable ASCII or is '\' or '$'.
+
+_w_tmux_name() (
+  printf '%s' "$1" | LC_ALL=C tr -c '\040-\043\045-\055\057-\071\073-\133\135-\176' '_'
+)
+
+# The tmux session for a worktree: the profile's `session` override if given,
+# else <repo basename>-<branch with / as ->, made tmux-safe.
+_w_session_name() (
+  repo="$1" branch="$2" override="${3:-}"
+  if [ -z "$override" ]; then
+    override="$(basename "$repo")-$(printf '%s' "$branch" | tr '/' '-')"
+  fi
+  _w_tmux_name "$override"
+)
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -647,13 +671,8 @@ _w_dev() (
     return 1
   }
 
-  session_override=''
-  session_override=$(_w_cfg_get session)
-  repo_base=''
-  repo_base=$(basename "$repo")
-  branch_safe=''
-  branch_safe=$(printf '%s' "$branch" | tr '/' '-')
-  session_name="${session_override:-${repo_base}-${branch_safe}}"
+  session_name=''
+  session_name=$(_w_session_name "$repo" "$branch" "$(_w_cfg_get session)")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     _w_cfg_cleanup
@@ -1097,10 +1116,8 @@ EOF
     return 1
   fi
 
-  repo_base='' branch_safe='' session_guess=''
-  repo_base=$(basename "$repo")
-  branch_safe=$(printf '%s' "$branch" | tr '/' '-')
-  session_guess="${repo_base}-${branch_safe}"
+  session_guess=''
+  session_guess=$(_w_session_name "$repo" "$branch")
   tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).

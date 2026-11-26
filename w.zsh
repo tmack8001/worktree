@@ -82,6 +82,29 @@ _w_worktree_branch() {
   printf '%s' "${ref#refs/heads/}"
 }
 
+# ── tmux session names ─────────────────────────────────────────────
+#
+# tmux does not store a session name as given: it replaces '.' and ':' with
+# '_' and escapes '\', '$' and control characters (and, outside a UTF-8
+# locale, replaces non-ASCII characters). A target like `=repo-v1.2` then names
+# no session (worse, `.` and `:` split a target into window and pane), so the
+# name used for new-session and every later target must be one tmux stores
+# unchanged. _w_tmux_name makes it one: '.' and ':' become '_' as tmux does,
+# and so does every other byte that is not printable ASCII or is '\' or '$'.
+# (tr on bytes, as in w.sh, so both variants give the same name.)
+
+_w_tmux_name() {
+  printf '%s' "$1" | LC_ALL=C tr -c '\040-\043\045-\055\057-\071\073-\133\135-\176' '_'
+}
+
+# The tmux session for a worktree: the profile's `session` override if given,
+# else <repo basename>-<branch with / as ->, made tmux-safe.
+_w_session_name() {
+  local repo="$1" branch="$2" name="${3:-}"
+  [[ -n "$name" ]] || name="${repo:t}-${branch//\//-}"
+  _w_tmux_name "$name"
+}
+
 # ── GitHub URL resolution ──────────────────────────────────────────
 
 # Detect if a string is a GitHub branch tree URL and extract the branch name.
@@ -537,7 +560,8 @@ _w_dev() {
     return 1
   }
 
-  local session_name="${W_PROFILE[session]:-$(basename "$repo")-${branch//\//-}}"
+  local session_name
+  session_name=$(_w_session_name "$repo" "$branch" "${W_PROFILE[session]:-}")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
@@ -1008,7 +1032,8 @@ EOF
   fi
 
   # Kill tmux session if one exists for this worktree
-  local session_guess="${repo:t}-${branch//\//-}"
+  local session_guess
+  session_guess=$(_w_session_name "$repo" "$branch")
   tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).

@@ -18,6 +18,12 @@ its tag.
 - `w.sh`: `_w_load_config` no longer leaves `w-cfg.*` directories in `$TMPDIR`: none is created for a missing
   config, it is removed when no profile matches, and `w add`, `w clone`, `w dev` and the dependency-dir lookup
   remove it when done (no trap is set).
+- tmux session names are now the form tmux stores: tmux 3.4 replaces `.` and `:` with `_` and escapes `\`, `$`
+  and control characters, so a repo or branch containing them (e.g. `fix/v1.2`) never matched its own session and
+  `w dev` tried to create it again (`duplicate session`), put its windows nowhere and attached nothing, and
+  `w rm` did not kill it. One helper (`_w_session_name`) maps `.`, `:`, `\`, `$` and every byte outside printable
+  ASCII to `_`, including a profile's `session` override, and is used for new-session, has-session,
+  attach-session, kill-session and the window targets (`w.sh`, `w.zsh`).
 
 ## [0.1.1]
 

@@ -588,6 +588,54 @@ FAKE
   [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
 }
 
+# ── tmux session names tmux would rewrite ──────────────────────────
+#
+# tmux stores a session name with '.' and ':' as '_' (and escapes '\\', '$'
+# and control characters), so worktree must use that stored form everywhere.
+
+@test "tmux names: _w_tmux_name maps what tmux rewrites or escapes to _" {
+  [ "$(_w_tmux_name 'my.re:po-fix/v1.2')" = "my_re_po-fix/v1_2" ]
+  [ "$(_w_tmux_name "$(printf 'a\\b$c\tdé e')")" = "a_b_c_d__ e" ]
+  [ "$(_w_tmux_name 'plain-name_09 ok')" = "plain-name_09 ok" ]
+}
+
+@test "tmux names: the session override is made tmux-safe too" {
+  [ "$(_w_session_name /x/my.repo fix/v1.2)" = "my_repo-fix-v1_2" ]
+  [ "$(_w_session_name /x/repo b 'my.session:1')" = "my_session_1" ]
+}
+
+@test "tmux names: w dev and w rm work with . and : in the repo and . in the branch" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  local r="$TEST_DIR/my.re:po" s="my_re_po-fix-v1_2"
+  git clone -q "$TEST_DIR/remote.git" "$r"
+  REPO="$r" _write_dev_toml
+  cd "$r"
+  worktree add fix/v1.2 >/dev/null 2>&1
+  [ -d "$r-worktrees/fix/v1.2" ]
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$r-worktrees/fix/v1.2"
+
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+  [[ "$output" == *"Starting dev session: $s "* ]]
+
+  # the second run finds the same session instead of creating another
+  : > "$TEST_DIR/attach.log"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to $s"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-sessions -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+
+  run bash -c "echo fix/v1.2 | (source '$REPO_ROOT/w.sh' && cd '$r' && worktree rm fix/v1.2 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has "$s"
+  [ "$status" -ne 0 ]
+}
+
 # ── worktree outside a repo ────────────────────────────────────────
 
 @test "w add: errors outside a git repo" {
