@@ -495,6 +495,99 @@ TOML
   [[ "$output" != *"Starting dev session"* ]]
 }
 
+# ── tmux sessions are matched by exact name ────────────────────────
+#
+# These use the real tmux against the private server under TEST_DIR (see
+# setup). A plain `-t name` also matches a session whose name only starts with
+# `name`; worktree must never kill or attach such a session.
+
+# Start a detached session on the private server. Its output and bats' fd 3
+# are closed so the server cannot keep bats' pipes open.
+_tmux_session() {
+  "$REAL_TMUX" new-session -d -s "$1" </dev/null >/dev/null 2>&1 3>&-
+}
+
+_tmux_has() {
+  "$REAL_TMUX" has-session -t "=$1" </dev/null >/dev/null 2>&1 3>&-
+}
+
+# A tmux on PATH that passes everything to the real tmux, except that
+# attach-session (which needs a terminal) logs the session its target
+# resolves to (list-windows takes a target-session, as attach-session does).
+_attach_logging_tmux() {
+  mkdir -p "$TEST_DIR/bin"
+  cat > "$TEST_DIR/bin/tmux" <<FAKE
+#!/bin/sh
+if [ "\$1" = attach-session ]; then
+  [ "\$2" = -t ] || exit 1
+  "$REAL_TMUX" list-windows -t "\$3" -F '#{session_name}' 2>/dev/null | head -n 1 >> "$TEST_DIR/attach.log"
+  exit
+fi
+exec "$REAL_TMUX" "\$@"
+FAKE
+  chmod +x "$TEST_DIR/bin/tmux"
+  : > "$TEST_DIR/attach.log"
+}
+
+@test "tmux exact: w rm does not kill a session that only starts with the name" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  [ ! -d "$WTS/foo" ]
+  _tmux_has repo-foo-bar
+}
+
+@test "tmux exact: w rm kills its own session and leaves the longer one" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _tmux_session repo-foo
+  run bash -c "echo foo | (source '$REPO_ROOT/w.sh' && cd '$REPO' && worktree rm foo 2>&1)"
+  [ "$status" -eq 0 ]
+  run _tmux_has repo-foo
+  [ "$status" -ne 0 ]
+  _tmux_has repo-foo-bar
+}
+
+@test "tmux exact: w dev does not attach a session that only starts with the name" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/foo"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Reattaching"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
+  _tmux_has repo-foo
+  # the new windows went to repo-foo, none to repo-foo-bar
+  [ "$("$REAL_TMUX" list-windows -t =repo-foo-bar -F x 3>&- | wc -l | tr -d ' ')" = "1" ]
+  [ "$("$REAL_TMUX" list-windows -t =repo-foo -F '#W' 3>&- | tr '\n' ' ')" = "shell server " ]
+}
+
+@test "tmux exact: w dev reattaches its own session, not the longer one" {
+  [ -n "$REAL_TMUX" ] || skip "tmux not installed"
+  _write_dev_toml
+  cd "$REPO"
+  worktree add foo >/dev/null 2>&1
+  _tmux_session repo-foo-bar
+  _tmux_session repo-foo
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  cd "$WTS/foo"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reattaching to repo-foo"* ]]
+  [ "$(cat "$TEST_DIR/attach.log")" = "repo-foo" ]
+}
+
 # ── worktree outside a repo ────────────────────────────────────────
 
 @test "w add: errors outside a git repo" {

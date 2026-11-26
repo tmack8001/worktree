@@ -539,9 +539,9 @@ _w_dev() {
 
   local session_name="${W_PROFILE[session]:-$(basename "$repo")-${branch//\//-}}"
 
-  if tmux has-session -t "$session_name" 2>/dev/null; then
+  if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
-    tmux attach-session -t "$session_name"
+    tmux attach-session -t "=$session_name"
     return 0
   fi
 
@@ -581,14 +581,14 @@ _w_dev() {
     wdir="${wdir:-$dest}"
 
     echo "  🪟 $wname"
-    tmux new-window -t "$session_name" -n "$wname" -c "$wdir"
+    tmux new-window -t "=$session_name:" -n "$wname" -c "$wdir"
     if [[ -n "$wcmd" ]] && (( allow )); then
-      tmux send-keys -t "$session_name:$wname" "$wcmd" Enter
+      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
     fi
   done
 
-  tmux select-window -t "${session_name}:shell"
-  tmux attach-session -t "$session_name"
+  tmux select-window -t "=${session_name}:shell"
+  tmux attach-session -t "=$session_name"
 }
 
 # ── Core commands ──────────────────────────────────────────────────
@@ -1009,7 +1009,7 @@ EOF
 
   # Kill tmux session if one exists for this worktree
   local session_guess="${repo:t}-${branch//\//-}"
-  tmux kill-session -t "$session_guess" 2>/dev/null
+  tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).
   [[ "${PWD:A}" == "$dest" || "${PWD:A}" == "$dest"/* ]] && cd "$repo"

@@ -642,9 +642,9 @@ _w_dev() (
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
   session_name="${session_override:-${repo_base}-${branch_safe}}"
 
-  if tmux has-session -t "$session_name" 2>/dev/null; then
+  if tmux has-session -t "=$session_name" 2>/dev/null; then
     echo "🔌 Reattaching to $session_name"
-    tmux attach-session -t "$session_name"
+    tmux attach-session -t "=$session_name"
     return 0
   fi
 
@@ -691,15 +691,15 @@ _w_dev() (
     esac
 
     echo "  🪟 $wname"
-    tmux new-window -t "$session_name" -n "$wname" -c "$wdir"
+    tmux new-window -t "=$session_name:" -n "$wname" -c "$wdir"
     if [ -n "$wcmd" ] && [ "$allow" -eq 1 ]; then
-      tmux send-keys -t "$session_name:$wname" "$wcmd" Enter
+      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
     fi
     i=$((i + 1))
   done
 
-  tmux select-window -t "$session_name:shell"
-  tmux attach-session -t "$session_name"
+  tmux select-window -t "=${session_name}:shell"
+  tmux attach-session -t "=$session_name"
 )
 
 # ── Core commands ──────────────────────────────────────────────────
@@ -1081,7 +1081,7 @@ EOF
   repo_base=$(basename "$repo")
   branch_safe=$(printf '%s' "$branch" | tr '/' '-')
   session_guess="${repo_base}-${branch_safe}"
-  tmux kill-session -t "$session_guess" 2>/dev/null
+  tmux kill-session -t "=$session_guess" 2>/dev/null
 
   # Leave the worktree first if we are in it (or below it).
   case "$(pwd -P)" in

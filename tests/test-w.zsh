@@ -1506,6 +1506,101 @@ TOML
   )
 }
 
+# ── tmux sessions are matched by exact name ───────────────────────
+#
+# Real tmux against the private server under TEST_ROOT. A plain `-t name` also
+# matches a session whose name only starts with `name`; worktree must never
+# kill or attach such a session.
+
+_zt_tmux_session() {
+  "$REAL_TMUX" new-session -d -s "$1" </dev/null >/dev/null 2>&1
+}
+
+_zt_tmux_has() {
+  "$REAL_TMUX" has-session -t "=$1" </dev/null >/dev/null 2>&1
+}
+
+# tmux passing everything to the real one, except attach-session (which needs
+# a terminal) logs the session its target resolves to (list-windows takes a
+# target-session, as attach-session does).
+_zt_attach_logging_tmux() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/tmux" <<FAKE
+#!/bin/sh
+if [ "\$1" = attach-session ]; then
+  [ "\$2" = -t ] || exit 1
+  "$REAL_TMUX" list-windows -t "\$3" -F '#{session_name}' 2>/dev/null | head -n 1 >> "$bin/attach.log"
+  exit
+fi
+exec "$REAL_TMUX" "\$@"
+FAKE
+  chmod +x "$bin/tmux"
+  : > "$bin/attach.log"
+}
+
+test_tmux_exact_match() {
+  echo "── tmux: sessions matched by exact name ──"
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+
+  local repo
+  repo=$(setup_repo "tx")
+  local wts="$TEST_ROOT/tx-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "server"
+TOML
+
+  (
+    cd "$repo"
+    w add foo >/dev/null 2>&1
+    _zt_tmux_session tx-foo-bar
+    echo "foo" | w rm foo >/dev/null 2>&1
+    assert_dir_not_exists "rm removed the worktree" "$wts/foo"
+    _zt_tmux_has tx-foo-bar && pass "rm leaves a session that only starts with the name" \
+      || fail "rm killed tx-foo-bar for worktree foo"
+
+    cd "$repo"
+    w add foo >/dev/null 2>&1
+    _zt_tmux_session tx-foo
+    echo "foo" | w rm foo >/dev/null 2>&1
+    _zt_tmux_has tx-foo && fail "rm left its own session tx-foo" || pass "rm kills its own session"
+    _zt_tmux_has tx-foo-bar && pass "rm keeps the longer session next to its own" \
+      || fail "rm killed tx-foo-bar next to tx-foo"
+  )
+
+  local bin="$TEST_ROOT/tx-bin"
+  _zt_attach_logging_tmux "$bin"
+  (
+    cd "$repo"
+    w add foo >/dev/null 2>&1
+    cd "$wts/foo"
+    local output rc
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with only a longer session succeeds" "0" "$rc"
+    [[ "$output" != *"Reattaching"* ]] && pass "dev does not reattach a longer session" \
+      || fail "dev reattached tx-foo-bar for foo"
+    assert_eq "dev attaches its own new session" "tx-foo" "$(<"$bin/attach.log")"
+    assert_eq "dev puts its windows in its own session" "shell server " \
+      "$("$REAL_TMUX" list-windows -t "=tx-foo" -F '#W' 2>/dev/null | tr '\n' ' ')"
+    assert_eq "dev adds no window to the longer session" "1" \
+      "$("$REAL_TMUX" list-windows -t "=tx-foo-bar" -F x 2>/dev/null | wc -l | tr -d ' ')"
+
+    : > "$bin/attach.log"
+    output=$(PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_contains "dev reattaches its own session" "$output" "Reattaching to tx-foo"
+    assert_eq "dev reattaches tx-foo, not tx-foo-bar" "tx-foo" "$(<"$bin/attach.log")"
+  )
+  "$REAL_TMUX" kill-session -t "=tx-foo" >/dev/null 2>&1
+  "$REAL_TMUX" kill-session -t "=tx-foo-bar" >/dev/null 2>&1
+}
+
 # ── gh command override ───────────────────────────────────────────
 
 _zt_fake_gh() {
@@ -1644,6 +1739,7 @@ test_dep_dirs_toml
 test_setup_skipped_by_default
 test_dev_commands_gated
 test_dev_guess_from_worktree
+test_tmux_exact_match
 test_gh_override
 
 # ── Summary ────────────────────────────────────────────────────────
