@@ -663,8 +663,15 @@ _w_dev() {
     _w_repo_commands_skipped window "${W_WINDOW_CMDS[@]}"
   fi
 
-  # Window 0: shell
-  tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell"
+  # Window 0: shell. Every window is targeted by the id tmux prints for it
+  # (@N), never by name: a name from .worktree.toml may contain '.' or ':',
+  # which split a `session:window.pane` target, or repeat another window's.
+  local shell_id
+  shell_id=$(tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell" -P -F '#{window_id}')
+  if [[ "$shell_id" != @* ]]; then
+    echo "  ❌ tmux did not report the new session's window — aborting session"
+    return 1
+  fi
 
   local i
   for (( i = 1; i <= ${#W_WINDOW_NAMES[@]}; i++ )); do
@@ -678,13 +685,16 @@ _w_dev() {
     wdir="${wdir:-$dest}"
 
     echo "  🪟 $wname"
-    tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")"
-    if [[ -n "$wcmd" ]] && (( allow )); then
-      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
+    local wid
+    wid=$(tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")" -P -F '#{window_id}')
+    if [[ "$wid" != @* ]]; then
+      echo "  ⚠️  tmux did not report window $wname: its command is not sent"
+    elif [[ -n "$wcmd" ]] && (( allow )); then
+      tmux send-keys -t "$wid" "$wcmd" Enter
     fi
   done
 
-  tmux select-window -t "=${session_name}:shell"
+  tmux select-window -t "$shell_id"
   tmux attach-session -t "=$session_name"
 }
 

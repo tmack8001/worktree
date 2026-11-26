@@ -793,8 +793,16 @@ EOF
     _w_repo_commands_skipped window "$W_CFG_WIN_CMDS"
   fi
 
-  # Window 0: shell
-  tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell"
+  # Window 0: shell. Every window is targeted by the id tmux prints for it
+  # (@N), never by name: a name from .worktree.toml may contain '.' or ':',
+  # which split a `session:window.pane` target, or repeat another window's.
+  shell_id=''
+  shell_id=$(tmux new-session -d -s "$session_name" -c "$(_w_tmux_dir "$dest")" -n "shell" -P -F '#{window_id}')
+  case "$shell_id" in
+    @*) ;;
+    *) echo "  ❌ tmux did not report the new session's window — aborting session"
+       return 1 ;;
+  esac
 
   i=1
   while [ "$i" -le "$W_CFG_WIN_COUNT" ]; do
@@ -811,14 +819,19 @@ EOF
     esac
 
     echo "  🪟 $wname"
-    tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")"
-    if [ -n "$wcmd" ] && [ "$allow" -eq 1 ]; then
-      tmux send-keys -t "=$session_name:$wname" "$wcmd" Enter
-    fi
+    wid=''
+    wid=$(tmux new-window -t "=$session_name:" -n "$wname" -c "$(_w_tmux_dir "$wdir")" -P -F '#{window_id}')
+    case "$wid" in
+      @*)
+        if [ -n "$wcmd" ] && [ "$allow" -eq 1 ]; then
+          tmux send-keys -t "$wid" "$wcmd" Enter
+        fi ;;
+      *) echo "  ⚠️  tmux did not report window $wname: its command is not sent" ;;
+    esac
     i=$((i + 1))
   done
 
-  tmux select-window -t "=${session_name}:shell"
+  tmux select-window -t "$shell_id"
   tmux attach-session -t "=$session_name"
 )
 

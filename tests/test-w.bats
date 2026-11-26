@@ -265,12 +265,17 @@ TOML
 
 # ── repo-command opt-in (dev: pre + window commands) ───────────────
 
+# Logs each call; like tmux, new-session and new-window with -P print an id
+# (@0, @1, ...) for the window they create.
 _fake_tmux() {
   mkdir -p "$TEST_DIR/bin"
   cat > "$TEST_DIR/bin/tmux" <<FAKE
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TEST_DIR/tmux.log"
 [ "\$1" = has-session ] && exit 1
+case " \$* " in
+  *" -P "*) n=\$(grep -c -- ' -P ' "$TEST_DIR/tmux.log"); echo "@\$((n - 1))" ;;
+esac
 exit 0
 FAKE
   chmod +x "$TEST_DIR/bin/tmux"
@@ -889,6 +894,75 @@ FAKE
   [ "$status" -eq 0 ]
   run _tmux_has "$s"
   [ "$status" -ne 0 ]
+}
+
+# The pane text of the window named $2 in session $1, once it shows $3 (polled
+# for up to 10s: the window's shell runs the typed command when it starts);
+# with no $3, as it is now.
+_window_text() {
+  local id='' n=0 text=''
+  # one window per line: its id, a space, its name (tmux escapes a tab in -F)
+  id=$("$REAL_TMUX" list-windows -t "=$1" -F '#{window_id} #{window_name}' 3>&- |
+    awk -v n="$2" '{ id = $1; sub(/^[^ ]* /, ""); if ($0 == n) print id }')
+  [ -n "$id" ] || return 1
+  while [ "$n" -lt 50 ]; do
+    text=$("$REAL_TMUX" capture-pane -p -t "$id" 3>&-)
+    case "$text" in *"${3:-}"*) break ;; esac
+    sleep 0.2; n=$((n + 1))
+  done
+  printf '%s' "$text"
+}
+
+# A window name with '.' (a pane separator) or ':' (a session separator) broke
+# `=session:name` targets, so its command went nowhere; windows are now
+# targeted by the id tmux prints when it creates them.
+@test "tmux names: w dev sends each window's command to that window, whatever its name" {
+  _need_tmux
+  cat > "$REPO/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "a.b"
+run = "echo A1""MARK"
+
+[[profile.default.windows]]
+name = "c:d"
+run = "echo C2""MARK"
+
+[[profile.default.windows]]
+name = "plain"
+run = "echo P3""MARK"
+TOML
+  cd "$REPO"
+  worktree add winnames >/dev/null 2>&1
+  _attach_logging_tmux
+  PATH="$TEST_DIR/bin:$PATH"
+  # the windows' shells: plain sh with no profile, so only the typed commands run
+  mkdir -p "$TEST_DIR/home"
+  export SHELL=/bin/sh HOME="$TEST_DIR/home" ENV=
+  export WORKTREE_ALLOW_REPO_COMMANDS=1
+  cd "$WTS/winnames"
+  run worktree dev
+  [ "$status" -eq 0 ]
+  local s=repo-winnames t
+  [ "$(cat "$TEST_DIR/attach.log")" = "$s" ]
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 3>&- | tr '\n' ' ')" = "shell a.b c:d plain " ]
+  # the shell window is selected
+  [ "$("$REAL_TMUX" list-windows -t "=$s" -F '#{window_active}#W' 3>&- | grep '^1')" = "1shell" ]
+
+  t=$(_window_text "$s" a.b A1MARK)
+  [[ "$t" == *A1MARK* ]]
+  [[ "$t" != *C2* && "$t" != *P3* ]]
+  t=$(_window_text "$s" c:d C2MARK)
+  [[ "$t" == *C2MARK* ]]
+  [[ "$t" != *A1* && "$t" != *P3* ]]
+  t=$(_window_text "$s" plain P3MARK)
+  [[ "$t" == *P3MARK* ]]
+  [[ "$t" != *A1* && "$t" != *C2* ]]
+  # checked last, after the other windows' commands have run
+  t=$(_window_text "$s" shell)
+  [[ "$t" != *A1* && "$t" != *C2* && "$t" != *P3* ]]
 }
 
 # A profile's `session` override names the session w dev makes; w rm must

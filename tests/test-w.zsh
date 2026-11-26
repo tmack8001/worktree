@@ -1601,6 +1601,8 @@ TOML
   )
 }
 
+# Logs each call; like tmux, new-session and new-window with -P print an id
+# (@0, @1, ...) for the window they create.
 _zt_fake_tmux() {
   local bin="$1"
   mkdir -p "$bin"
@@ -1608,6 +1610,9 @@ _zt_fake_tmux() {
 #!/bin/sh
 printf '%s\n' "\$*" >> "$bin/tmux.log"
 [ "\$1" = has-session ] && exit 1
+case " \$* " in
+  *" -P "*) n=\$(grep -c -- ' -P ' "$bin/tmux.log"); echo "@\$((n - 1))" ;;
+esac
 exit 0
 FAKE
   chmod +x "$bin/tmux"
@@ -1825,6 +1830,84 @@ TOML
   "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
 }
 
+# The pane text of the window named $2 in session $1, once it shows $3 (polled
+# for up to 10s: the window's shell runs the typed command when it starts);
+# with no $3, as it is now.
+_zt_window_text() {
+  local id n=0 text
+  # one window per line: its id, a space, its name (tmux escapes a tab in -F)
+  id=$("$REAL_TMUX" list-windows -t "=$1" -F '#{window_id} #{window_name}' 2>/dev/null |
+    awk -v n="$2" '{ id = $1; sub(/^[^ ]* /, ""); if ($0 == n) print id }')
+  [[ -n "$id" ]] || return 1
+  while (( n < 50 )); do
+    text=$("$REAL_TMUX" capture-pane -p -t "$id" 2>/dev/null)
+    [[ "$text" == *"${3:-}"* ]] && break
+    sleep 0.2; (( n++ ))
+  done
+  print -r -- "$text"
+}
+
+# A window name with '.' (a pane separator) or ':' (a session separator) broke
+# `=session:name` targets, so its command went nowhere; windows are now
+# targeted by the id tmux prints when it creates them.
+test_tmux_window_names() {
+  echo "── tmux: window commands reach their window, whatever its name ──"
+  if [[ -z "$REAL_TMUX" ]]; then
+    echo "  (skipped: tmux not installed)"
+    return 0
+  fi
+  local repo
+  repo=$(setup_repo "wn")
+  local wts="$TEST_ROOT/wn-worktrees"
+  cat > "$repo/.worktree.toml" <<'TOML'
+[profile.default]
+branches = "*"
+
+[[profile.default.windows]]
+name = "a.b"
+run = "echo A1""MARK"
+
+[[profile.default.windows]]
+name = "c:d"
+run = "echo C2""MARK"
+
+[[profile.default.windows]]
+name = "plain"
+run = "echo P3""MARK"
+TOML
+  local bin="$TEST_ROOT/wn-bin" s=wn-winnames
+  _zt_attach_logging_tmux "$bin"
+  mkdir -p "$TEST_ROOT/wn-home"
+  (
+    cd "$repo"
+    w add winnames >/dev/null 2>&1
+    cd "$wts/winnames"
+    # the windows' shells: plain sh with no profile, so only the typed commands run
+    export SHELL=/bin/sh HOME="$TEST_ROOT/wn-home" ENV=
+    local output rc t
+    output=$(WORKTREE_ALLOW_REPO_COMMANDS=1 PATH="$bin:$PATH" w dev 2>&1); rc=$?
+    assert_exit_code "dev with . and : in window names succeeds" "0" "$rc"
+    assert_eq "dev attaches its session" "$s" "$(<"$bin/attach.log")"
+    assert_eq "window names are kept as written" "shell a.b c:d plain " \
+      "$("$REAL_TMUX" list-windows -t "=$s" -F '#W' 2>/dev/null | tr '\n' ' ')"
+    assert_eq "the shell window is selected" "1shell" \
+      "$("$REAL_TMUX" list-windows -t "=$s" -F '#{window_active}#W' 2>/dev/null | grep '^1')"
+    t=$(_zt_window_text "$s" a.b A1MARK)
+    [[ "$t" == *A1MARK* && "$t" != *C2* && "$t" != *P3* ]] && pass "a.b gets its own command" \
+      || fail "a.b pane: $t"
+    t=$(_zt_window_text "$s" c:d C2MARK)
+    [[ "$t" == *C2MARK* && "$t" != *A1* && "$t" != *P3* ]] && pass "c:d gets its own command" \
+      || fail "c:d pane: $t"
+    t=$(_zt_window_text "$s" plain P3MARK)
+    [[ "$t" == *P3MARK* && "$t" != *A1* && "$t" != *C2* ]] && pass "plain gets its own command" \
+      || fail "plain pane: $t"
+    t=$(_zt_window_text "$s" shell)
+    [[ "$t" != *A1* && "$t" != *C2* && "$t" != *P3* ]] && pass "the shell window gets no command" \
+      || fail "shell pane: $t"
+  )
+  "$REAL_TMUX" kill-session -t "=$s" >/dev/null 2>&1
+}
+
 # A profile's `session` override names the session w dev makes; w rm must
 # look it up the same way and kill that session, not the default name.
 test_rm_session_override() {
@@ -2016,6 +2099,7 @@ test_branch_arg_from_git
 test_switch_from_git
 test_tmux_exact_match
 test_tmux_names
+test_tmux_window_names
 test_rm_session_override
 test_gh_override
 

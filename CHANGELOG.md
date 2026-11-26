@@ -22,6 +22,11 @@ its tag.
 
 ### Fixed
 
+- `w dev` sends each window's `run` command to that window, and selects the `shell` window, by the window id
+  tmux prints when it creates the window (`new-session`/`new-window -P -F '#{window_id}'`, targets `@N`) instead
+  of `=session:name`. A window name containing `.` (a pane separator in a target) got no command, and a name
+  repeating another window's (e.g. a second `shell`) could get the wrong one. Window names are kept as written.
+  Checked with tmux 2.1, 3.4 and 3.8 (`w.sh`, `w.zsh`).
 - `w rm` kills the tmux session named by the matched profile's `session` override, looked up in
   `.worktree.toml` the same way as `w dev` (one helper, `_w_profile_session_name`). Before, it always killed
   `<repo>-<branch>`, so it left the session `w dev` had made and could kill an unrelated session that had the
